@@ -1,0 +1,13 @@
+Name: HBEAM
+Version: 0.0
+Description: Haskell virtual machine for Erlang's BEAM bytecode
+License: GPL
+License-file: COPYING
+Author: Mikael Brockman
+Maintainer: phubuh@gmail.com
+Build-Type: Simple
+Cabal-Version: >=1.2
+
+Executable hbeam
+  Main-is: HBEAM.hs
+  Build-Depends: base >= 3 && < 5
