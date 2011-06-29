@@ -18,18 +18,24 @@ import Control.Applicative
 import Opcodes
 
 
+type ChunkData = B.ByteString
+type Chunk     = (String, ChunkData)
+
+type Opcode    = String
+type Operation = (Opcode, [Argument])
+
 newtype Atom = Atom String
              deriving Show
       
 data BEAMFile = BEAMFile { beamFileAtoms :: [Atom] 
-                         , beamFileCode :: [(String, [BEAMArgument])] }
+                         , beamFileCode  :: [Operation] }
               deriving Show
 
-data BEAMArgumentTag = TagA | TagF | TagH | TagI | TagU
-                     | TagX | TagY | TagZ
-                     | TagFR | TagAtom | TagFloat | TagLiteral
+data ArgumentTag = TagA | TagF | TagH | TagI | TagU
+                 | TagX | TagY | TagZ
+                 | TagFR | TagAtom | TagFloat | TagLiteral
      
-data BEAMArgument = IArg Integer
+data Argument = IArg Integer
   deriving Show
 
 
@@ -38,26 +44,30 @@ main =
   do binary <- B.getContents
      print (parseBEAMFile (readBEAMFile binary))
      
+readBEAMFile :: ChunkData -> [Chunk]
 readBEAMFile binary = runGet (getHeader >> getChunks) binary
   where 
     getHeader = skip 12
     getChunks = getChunk `untilM` isEmpty
-    getChunk =
-      do name <- getLazyByteString 4
+    getChunk  =
+      do name    <- getString 4
          content <- getInt32 >>= getLazyByteString
          align 4
-         return (unpackByteString name, content)
+         return (name, content)
 
+parseBEAMFile :: [Chunk] -> Maybe BEAMFile
 parseBEAMFile chunks =
   do atomChunk <- lookup "Atom" chunks
      codeChunk <- lookup "Code" chunks
      return $ BEAMFile { beamFileAtoms = parseAtomChunk atomChunk 
-                       , beamFileCode = parseCodeChunk codeChunk }
+                       , beamFileCode  = parseCodeChunk codeChunk }
      
+parseAtomChunk :: ChunkData -> [Atom]
 parseAtomChunk chunk = flip runGet chunk $
   do count <- getInt32
      replicateM count (getWord8 >>= getString >>= return . Atom)
 
+parseCodeChunk :: ChunkData -> [Operation]
 parseCodeChunk chunk = flip runGet chunk $
   do infoLength <- getInt32
      unless (infoLength == 16) $
@@ -69,20 +79,23 @@ parseCodeChunk chunk = flip runGet chunk $
      unless (maxOpcode' <= maxOpcode) $
        fail ("max opcode too big: " ++ show maxOpcode')
      skip 8 -- label & function counts
-     readOpcode `untilM` isEmpty
+     readOperation `untilM` isEmpty
      
-readOpcode =
-  do (opName, argCount) <- fmap (opcodeInfo . fromIntegral) getWord8
+readOperation :: Get Operation
+readOperation =
+  do (opcode, argCount) <- fmap (opcodeInfo . fromIntegral) getWord8
      args <- replicateM argCount readArgument
-     return (opName, args)
+     return (opcode, args)
      
+readArgument :: Get Argument
 readArgument =
-  do taggedByte <- fmap fromIntegral getWord8
+  do taggedByte <- getInt8
      case parseTag taggedByte of
        TagZ -> readZArgument taggedByte
        TagA -> readAArgument taggedByte
-       _ -> readIArgument taggedByte
+       _    -> readIArgument taggedByte
      
+parseTag :: Integer -> ArgumentTag
 parseTag x =
   case x .&. 7 of
     0 -> TagU
@@ -95,13 +108,16 @@ parseTag x =
     7 -> TagZ
     _ -> error $ "weird tag: " ++ show x
     
+readAArgument :: Integer -> Get Argument
 readAArgument tag = 
   -- FIXME: wrong
   readIArgument tag
   
+readZArgument :: Integer -> Get Argument
 readZArgument tag =
   fail "can't handle floats or lists yet"
   
+readIArgument :: Integer -> Get Argument
 readIArgument tag | tag .&. 0x8 == 0 =
   return $ IArg (tag `shiftR` 4)
 readIArgument tag | tag .&. 0x10 == 0 =
@@ -117,6 +133,7 @@ getString :: Integral a => a -> Get String
 getString n =
   getLazyByteString (fromIntegral n) >>= return . unpackByteString
 
+unpackByteString :: B.ByteString -> String
 unpackByteString = T.unpack . decodeASCII
 
 getInt32 :: Integral a => Get a
