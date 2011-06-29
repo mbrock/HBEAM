@@ -17,6 +17,22 @@ import Control.Applicative
 
 import Opcodes
 
+
+newtype Atom = Atom String
+             deriving Show
+      
+data BEAMFile = BEAMFile { beamFileAtoms :: [Atom] 
+                         , beamFileCode :: [(String, [BEAMArgument])] }
+              deriving Show
+
+data BEAMArgumentTag = TagA | TagF | TagH | TagI | TagU
+                     | TagX | TagY | TagZ
+                     | TagFR | TagAtom | TagFloat | TagLiteral
+     
+data BEAMArgument = IArg Integer
+  deriving Show
+
+
 main :: IO ()
 main =
   do binary <- B.getContents
@@ -24,24 +40,13 @@ main =
      
 readBEAMFile binary = runGet (getHeader >> getChunks) binary
   where 
-    getHeader =
-      do skip 12
-    getChunks =
-      do done <- isEmpty
-         if done
-           then return []
-           else do chunk <- getChunk
-                   chunks <- getChunks
-                   return (chunk:chunks)
+    getHeader = skip 12
+    getChunks = getChunk `untilM` isEmpty
     getChunk =
       do name <- getLazyByteString 4
-         stuff <- getInt32 >>= getLazyByteString
+         content <- getInt32 >>= getLazyByteString
          align 4
-         return (unpackByteString name, stuff)
-         
-data BEAMFile = BEAMFile { beamFileAtoms :: [Atom] 
-                         , beamFileCode :: [(String, [BEAMArgument])] }
-              deriving Show
+         return (unpackByteString name, content)
 
 parseBEAMFile chunks =
   do atomChunk <- lookup "Atom" chunks
@@ -49,30 +54,10 @@ parseBEAMFile chunks =
      return $ BEAMFile { beamFileAtoms = parseAtomChunk atomChunk 
                        , beamFileCode = parseCodeChunk codeChunk }
      
-getString :: Integral a => a -> Get String
-getString n =
-  getLazyByteString (fromIntegral n) >>= return . unpackByteString
-  
-unpackByteString = T.unpack . decodeASCII
-     
-newtype Atom = Atom String
-             deriving Show
-  
 parseAtomChunk chunk = flip runGet chunk $
   do count <- getInt32
      replicateM count (getWord8 >>= getString >>= return . Atom)
 
-getInt32 :: Integral a => Get a
-getInt32 = fmap fromIntegral getWord32be
-
-getInt8 :: Integral a => Get a
-getInt8 = fmap fromIntegral getWord8
-
-align :: Int -> Get ()
-align n =
-  do m <- fmap fromIntegral bytesRead
-     skip ((((m + n - 1) `div` n) * n) - m)
-     
 parseCodeChunk chunk = flip runGet chunk $
   do infoLength <- getInt32
      unless (infoLength == 16) $
@@ -85,10 +70,6 @@ parseCodeChunk chunk = flip runGet chunk $
        fail ("max opcode too big: " ++ show maxOpcode')
      skip 8 -- label & function counts
      readOpcode `untilM` isEmpty
-     
-data BEAMArgumentTag = TagA | TagF | TagH | TagI | TagU
-                     | TagX | TagY | TagZ
-                     | TagFR | TagAtom | TagFloat | TagLiteral
      
 readOpcode =
   do (opName, argCount) <- fmap (opcodeInfo . fromIntegral) getWord8
@@ -121,9 +102,6 @@ readAArgument tag =
 readZArgument tag =
   fail "can't handle floats or lists yet"
   
-data BEAMArgument = IArg Integer
-  deriving Show
-                    
 readIArgument tag | tag .&. 0x8 == 0 =
   return $ IArg (tag `shiftR` 4)
 readIArgument tag | tag .&. 0x10 == 0 =
@@ -131,3 +109,23 @@ readIArgument tag | tag .&. 0x10 == 0 =
      return $ IArg (((tag .&. 0xe0) `shiftL` 3) .|. b)
 readIArgument tag =
   fail "integer too big for me"
+  
+
+-- Helper functions for reading binary stuff.
+
+getString :: Integral a => a -> Get String
+getString n =
+  getLazyByteString (fromIntegral n) >>= return . unpackByteString
+
+unpackByteString = T.unpack . decodeASCII
+
+getInt32 :: Integral a => Get a
+getInt32 = fmap fromIntegral getWord32be
+
+getInt8 :: Integral a => Get a
+getInt8 = fmap fromIntegral getWord8
+
+align :: Int -> Get ()
+align n =
+  do m <- fmap fromIntegral bytesRead
+     skip ((((m + n - 1) `div` n) * n) - m)
