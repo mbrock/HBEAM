@@ -6,6 +6,7 @@ import qualified Codec.Compression.Zlib as Zlib
 import Data.Binary
 import Data.Binary.Get
 
+import Data.Char
 import Data.Bits
 
 import qualified Data.Text.Lazy as T
@@ -18,12 +19,17 @@ import Control.Applicative
 
 import Opcodes
 
-
 type ChunkData = B.ByteString
 type Chunk     = (String, ChunkData)
 
 type Opcode    = String
 type Operation = (Opcode, [Operand])
+
+data External  = UnparsedLiteral B.ByteString
+               | ExtInteger Integer
+               | ExtTuple [External]
+               | ExtAtom String
+               deriving Show
 
 newtype Atom   = Atom String deriving Show
                       
@@ -50,11 +56,8 @@ data Operand = IOperand Integer
              | UOperand Integer
              | XOperand Integer
              | AOperand Atom
-             | LOperand Literal
+             | LOperand External
   deriving Show
-
-type Literal = ChunkData
-
 
 main :: IO ()
 main = B.getContents >>= print . parseBEAMFile . readBEAMFile
@@ -96,14 +99,28 @@ parseAtomChunk =
   readListChunk $ getWord8 >>= getString >>= return . Atom
   
 readListChunk :: Get a -> ChunkData -> [a]
-readListChunk m = runGet (readMany m)
+readListChunk m = runGet (readMany32 m)
 
-parseLiteralChunk :: ChunkData -> [ChunkData]
+parseLiteralChunk :: ChunkData -> [External]
 parseLiteralChunk x =
-  readListChunk (getInt32 >>= getLazyByteString) (Zlib.decompress y)
-    where y = B.drop 4 x -- skip length of uncompressed data
+  readListChunk (getInt32 >>= getLazyByteString >>=
+                 return . parseLiteral) y
+    where y = Zlib.decompress $ B.drop 4 x
+          
+parseLiteral :: ChunkData -> External
+parseLiteral = runGet (verify >> readExternal)
+  where verify = getInt8 `expecting` ("external version magic", 131)
+        
+readExternal :: Get External
+readExternal =
+  do tag <- getLatin1Char
+     case tag of
+       'a' -> ExtInteger <$> getInt8
+       'h' -> ExtTuple <$> (readMany8 readExternal)
+       'd' -> ExtAtom <$> (getWord16be >>= getString)
+       _   -> fail $ "readExternal: can't do tag " ++ show tag
 
-parseCodeChunk :: [Atom] -> [Literal] -> ChunkData -> [FunDef]
+parseCodeChunk :: [Atom] -> [External] -> ChunkData -> [FunDef]
 parseCodeChunk atoms literals =
   runGet $ do verifyHeader
               operations <- (readOperation literals atoms) `untilM` isEmpty
@@ -135,13 +152,13 @@ splitToNextFunctionLabel acc ops =
 readAtom :: [Atom] -> Get Atom
 readAtom atoms = atomIndex atoms <$> getInt32
 
-readOperation :: [Literal] -> [Atom] -> Get Operation
+readOperation :: [External] -> [Atom] -> Get Operation
 readOperation literals atoms =
   do (opcode, argCount) <- (opcodeInfo . fromIntegral) <$> getWord8
      args <- replicateM argCount (readOperand literals atoms)
      return (opcode, args)
      
-readOperand :: [Literal] -> [Atom] -> Get Operand
+readOperand :: [External] -> [Atom] -> Get Operand
 readOperand literals atoms =
   do taggedByte <- getInt8
      case parseTag taggedByte of
@@ -169,7 +186,7 @@ readAOperand atoms tag =
                            0 -> Atom "nil"
                            _ -> atomIndex atoms i)
   
-readZOperand :: [Literal] -> Integer -> Get Operand
+readZOperand :: [External] -> Integer -> Get Operand
 readZOperand literals tag =
   case tag `shiftR` 4 of
     4 -> do UOperand i <- getInt8 >>= readIntegralOperand
@@ -200,7 +217,7 @@ readInteger tag =
 atomIndex :: Integral a => [Atom] -> a -> Atom
 atomIndex xs i = xs !! (fromIntegral i - 1)
 
-literalIndex :: Integral a => [Literal] -> a -> Literal
+literalIndex :: Integral a => [External] -> a -> External
 literalIndex xs i = xs !! (fromIntegral i)
 
 
@@ -219,8 +236,14 @@ getInt32 = fromIntegral <$> getWord32be
 getInt8 :: Integral a => Get a
 getInt8 = fromIntegral <$> getWord8
 
-readMany :: Get a -> Get [a]
-readMany m = getInt32 >>= flip replicateM m
+getLatin1Char :: Get Char
+getLatin1Char = chr <$> getInt8
+
+readMany32 :: Get a -> Get [a]
+readMany32 m = getInt32 >>= flip replicateM m
+
+readMany8 :: Get a -> Get [a]
+readMany8 m = getInt8 >>= flip replicateM m
 
 align :: Int -> Get ()
 align n =
