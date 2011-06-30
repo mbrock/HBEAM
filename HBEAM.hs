@@ -22,7 +22,7 @@ type ChunkData = B.ByteString
 type Chunk     = (String, ChunkData)
 
 type Opcode    = String
-type Operation = (Opcode, [Argument])
+type Operation = (Opcode, [Operand])
 
 newtype Atom   = Atom String deriving Show
                       
@@ -41,11 +41,12 @@ data BEAMFile = BEAMFile { beamFileAtoms   :: [Atom]
                          , beamFileExports :: [Export] }
               deriving Show
 
-data ArgumentTag = TagA | TagF | TagH | TagI | TagU
-                 | TagX | TagY | TagZ
-                 | TagFR | TagAtom | TagFloat | TagLiteral
+data OperandTag = TagA | TagF | TagH | TagI | TagU
+                | TagX | TagY | TagZ
+                | TagFR | TagAtom | TagFloat | TagLiteral
      
-data Argument = IArg Integer
+data Operand = IOperand Integer
+             | AOperand Atom
   deriving Show
 
 
@@ -93,7 +94,8 @@ readListChunk m = runGet (readMany m)
 parseCodeChunk :: [Atom] -> ChunkData -> [FunDef]
 parseCodeChunk atoms =
   runGet $ do verifyHeader
-              parseOperations atoms <$> (readOperation `untilM` isEmpty)
+              operations <- (readOperation atoms) `untilM` isEmpty
+              return $ parseOperations atoms operations
     where verifyHeader =
             do getInt32 `expecting` ("code info length", 16)
                getInt32 `expecting` ("instruction set", 0)
@@ -103,10 +105,10 @@ parseCodeChunk atoms =
                skip 8 -- label & function counts
 
 parseOperations :: [Atom] -> [Operation] -> [FunDef]
-parseOperations atoms (_ : ("func_info", [IArg m, IArg f, IArg a])
-                         : ("label", [IArg entry]) : xs) =
+parseOperations atoms (_ : ("func_info", [AOperand m, AOperand f, IOperand a])
+                         : ("label", [IOperand entry]) : xs) =
   let (code, rest) = splitToNextFunctionLabel [] xs
-  in FunDef (atomIndex atoms f) a entry code : parseOperations atoms rest
+  in FunDef f a entry code : parseOperations atoms rest
 parseOperations _ [] = []
 
 splitToNextFunctionLabel :: [Operation] -> [Operation] ->
@@ -121,21 +123,21 @@ splitToNextFunctionLabel acc ops =
 readAtom :: [Atom] -> Get Atom
 readAtom atoms = atomIndex atoms <$> getInt32
 
-readOperation :: Get Operation
-readOperation =
+readOperation :: [Atom] -> Get Operation
+readOperation atoms =
   do (opcode, argCount) <- (opcodeInfo . fromIntegral) <$> getWord8
-     args <- replicateM argCount readArgument
+     args <- replicateM argCount (readOperand atoms)
      return (opcode, args)
      
-readArgument :: Get Argument
-readArgument =
+readOperand :: [Atom] -> Get Operand
+readOperand atoms =
   do taggedByte <- getInt8
      case parseTag taggedByte of
-       TagZ -> readZArgument taggedByte
-       TagA -> readAArgument taggedByte
-       _    -> readIArgument taggedByte
+       TagZ -> readZOperand taggedByte
+       TagA -> readAOperand atoms taggedByte
+       _    -> readIOperand taggedByte
      
-parseTag :: Integer -> ArgumentTag
+parseTag :: Integer -> OperandTag
 parseTag x =
   case x .&. 7 of
     0 -> TagU
@@ -148,22 +150,24 @@ parseTag x =
     7 -> TagZ
     _ -> error $ "weird tag: " ++ show x
     
-readAArgument :: Integer -> Get Argument
-readAArgument tag = 
-  -- FIXME: wrong
-  readIArgument tag
+readAOperand :: [Atom] -> Integer -> Get Operand
+readAOperand atoms tag =
+  do IOperand i <- readIOperand tag
+     return $ AOperand (case i of
+                           0 -> Atom "nil"
+                           _ -> atomIndex atoms i)
   
-readZArgument :: Integer -> Get Argument
-readZArgument tag =
+readZOperand :: Integer -> Get Operand
+readZOperand tag =
   fail "can't handle floats or lists yet"
   
-readIArgument :: Integer -> Get Argument
-readIArgument tag | tag .&. 0x8 == 0 =
-  return $ IArg (tag `shiftR` 4)
-readIArgument tag | tag .&. 0x10 == 0 =
+readIOperand :: Integer -> Get Operand
+readIOperand tag | tag .&. 0x8 == 0 =
+  return $ IOperand (tag `shiftR` 4)
+readIOperand tag | tag .&. 0x10 == 0 =
   do b <- getInt8
-     return $ IArg (((tag .&. 0xe0) `shiftL` 3) .|. b)
-readIArgument tag =
+     return $ IOperand (((tag .&. 0xe0) `shiftL` 3) .|. b)
+readIOperand tag =
   fail "integer too big for me"
   
 
