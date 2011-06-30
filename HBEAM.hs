@@ -50,9 +50,7 @@ data Argument = IArg Integer
 
 
 main :: IO ()
-main =
-  do binary <- B.getContents
-     print (parseBEAMFile (readBEAMFile binary))
+main = B.getContents >>= print . parseBEAMFile . readBEAMFile
      
 readBEAMFile :: ChunkData -> [Chunk]
 readBEAMFile binary = runGet (getHeader >> getChunks) binary
@@ -67,10 +65,10 @@ readBEAMFile binary = runGet (getHeader >> getChunks) binary
 
 parseBEAMFile :: [Chunk] -> Maybe BEAMFile
 parseBEAMFile chunks =
-  do atoms   <- parseAtomChunk <$> (lookup "Atom" chunks)
+  do atoms   <- parseAtomChunk         <$> (lookup "Atom" chunks)
      imports <- parseImportChunk atoms <$> (lookup "ImpT" chunks)
      exports <- parseExportChunk atoms <$> (lookup "ExpT" chunks)
-     fundefs <- parseCodeChunk atoms <$> (lookup "Code" chunks)
+     fundefs <- parseCodeChunk   atoms <$> (lookup "Code" chunks)
      return $ BEAMFile { beamFileAtoms   = atoms 
                        , beamFileFunDefs = fundefs 
                        , beamFileImports = imports 
@@ -78,16 +76,19 @@ parseBEAMFile chunks =
      
 parseImportChunk :: [Atom] -> ChunkData -> [MFA]
 parseImportChunk atoms =
-  runGet (readMany (liftM3 MFA getAtom getAtom getInt32))
+  readListChunk $ MFA <$> getAtom <*> getAtom <*> getInt32
     where getAtom = readAtom atoms
      
 parseExportChunk :: [Atom] -> ChunkData -> [Export]
 parseExportChunk atoms =
-  runGet (readMany (liftM3 Export (readAtom atoms) getInt32 getInt32))
+  readListChunk $ Export <$> (readAtom atoms) <*> getInt32 <*> getInt32
   
 parseAtomChunk :: ChunkData -> [Atom]
 parseAtomChunk =
-  runGet (readMany $ getWord8 >>= getString >>= return . Atom)
+  readListChunk $ getWord8 >>= getString >>= return . Atom
+  
+readListChunk :: Get a -> ChunkData -> [a]
+readListChunk m = runGet (readMany m)
 
 parseCodeChunk :: [Atom] -> ChunkData -> [FunDef]
 parseCodeChunk atoms =
@@ -103,19 +104,19 @@ parseCodeChunk atoms =
 
 parseOperations :: [Atom] -> [Operation] -> [FunDef]
 parseOperations atoms (_ : ("func_info", [IArg m, IArg f, IArg a])
-                       : ("label", [IArg entry]) : xs) =
+                         : ("label", [IArg entry]) : xs) =
   let (code, rest) = splitToNextFunctionLabel [] xs
   in FunDef (atomIndex atoms f) a entry code : parseOperations atoms rest
 parseOperations _ [] = []
 
 splitToNextFunctionLabel :: [Operation] -> [Operation] ->
                             ([Operation], [Operation])
-splitToNextFunctionLabel acc xs@(_ : ("func_info", _) : _) =
-  (reverse acc, xs)
-splitToNextFunctionLabel acc [("int_code_end", [])] =
-  (reverse acc, [])
-splitToNextFunctionLabel acc (x:xs) =
-  splitToNextFunctionLabel (x:acc) xs
+splitToNextFunctionLabel acc ops =
+  case ops of
+    (_ : ("func_info", _) : _) -> (reverse acc, ops)
+    [("int_code_end", [])]     -> (reverse acc, [])
+    (x:xs)                     -> splitToNextFunctionLabel (x:acc) xs
+    []                         -> error "code chunk ended prematurely"
      
 readAtom :: [Atom] -> Get Atom
 readAtom atoms = atomIndex atoms <$> getInt32
