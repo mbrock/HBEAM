@@ -8,6 +8,7 @@ import Data.Binary.Get
 
 import Data.Char
 import Data.Bits
+import Data.Maybe
 
 import qualified Data.Text.Lazy as T
 
@@ -25,12 +26,11 @@ type Chunk     = (String, ChunkData)
 type Opcode    = String
 type Operation = (Opcode, [Operand])
 
-data External  = UnparsedLiteral B.ByteString
-               | ExtInteger Integer
-               | ExtTuple [External]
-               | ExtAtom String
-               | ExtString String
-               | ExtList [External]
+data External  = ExtInteger Integer
+               | ExtTuple   [External]
+               | ExtAtom    String
+               | ExtString  String
+               | ExtList    [External]
                deriving Show
 
 newtype Atom   = Atom String deriving Show
@@ -53,16 +53,24 @@ data BEAMFile = BEAMFile { beamFileAtoms   :: [Atom]
 data OperandTag = TagA | TagF | TagH | TagI | TagU
                 | TagX | TagY | TagZ
                 | TagFR | TagAtom | TagFloat | TagLiteral
+                deriving Show
      
 data Operand = IOperand Integer
              | UOperand Integer
              | XOperand Integer
+             | YOperand Integer
+             | FOperand Integer
              | AOperand Atom
              | LOperand External
-  deriving Show
+             deriving Show
 
 main :: IO ()
-main = B.getContents >>= print . parseBEAMFile . readBEAMFile
+main = do Just x <- (parseBEAMFile . readBEAMFile) <$> B.getContents
+          mapM_ (\(FunDef (Atom name) arity label ops) ->
+                  do putStrLn (name ++ "/" ++ show arity ++ " (@" ++
+                               show label ++ "):")
+                     mapM_ (\op -> putStrLn ("    " ++ show op)) ops
+                     putStrLn "") (beamFileFunDefs x)
      
 readBEAMFile :: ChunkData -> [Chunk]
 readBEAMFile binary = runGet (getHeader >> getChunks) binary
@@ -80,7 +88,7 @@ parseBEAMFile chunks =
   do atoms    <- parseAtomChunk                   <$> (lookup "Atom" chunks)
      imports  <- parseImportChunk  atoms          <$> (lookup "ImpT" chunks)
      exports  <- parseExportChunk  atoms          <$> (lookup "ExpT" chunks)
-     literals <- parseLiteralChunk                <$> (lookup "LitT" chunks)
+     let literals = maybe [] parseLiteralChunk (lookup "LitT" chunks)
      fundefs  <- parseCodeChunk    atoms literals <$> (lookup "Code" chunks)
      return $ BEAMFile { beamFileAtoms   = atoms 
                        , beamFileFunDefs = fundefs 
@@ -118,11 +126,11 @@ readExternal =
   do tag <- getLatin1Char
      case tag of
        'a' -> ExtInteger <$> getInt8
-       'h' -> ExtTuple <$> (readMany8 readExternal)
-       'd' -> ExtAtom <$> (getWord16be >>= getString)
-       'k' -> ExtString <$> (getWord16be >>= getString)
-       'l' -> ExtList <$> (readMany32 readExternal)
-       'j' -> return (ExtList [])
+       'h' -> ExtTuple   <$> (readMany8 readExternal)
+       'd' -> ExtAtom    <$> (getWord16be >>= getString)
+       'k' -> ExtString  <$> (getWord16be >>= getString)
+       'l' -> ExtList    <$> (readMany32 readExternal)
+       'j' -> ExtList    <$> (return [])
        _   -> fail $ "readExternal: can't do tag " ++ show tag
 
 parseCodeChunk :: [Atom] -> [External] -> ChunkData -> [FunDef]
@@ -201,11 +209,13 @@ readZOperand literals tag =
 readIntegralOperand :: Integer -> Get Operand
 readIntegralOperand tag =
   do i <- readInteger tag
-     return $ (case parseTag tag of
-                  TagU -> UOperand
-                  TagI -> IOperand
-                  TagX -> XOperand
-                  _    -> error $ "readIntegralOperand: ? " ++ show tag) i
+     return $ case parseTag tag of
+                TagU -> UOperand i
+                TagI -> IOperand i
+                TagX -> XOperand i
+                TagY -> YOperand i
+                TagF -> FOperand i
+                x    -> error ("readIntegralOperand: ? " ++ show x)
       
 readInteger :: Integer -> Get Integer
 readInteger tag | tag .&. 0x8 == 0 =
