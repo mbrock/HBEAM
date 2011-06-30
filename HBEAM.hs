@@ -1,6 +1,7 @@
 module Main where
 
 import qualified Data.ByteString.Lazy as B
+import qualified Codec.Compression.Zlib as Zlib
 
 import Data.Binary
 import Data.Binary.Get
@@ -46,8 +47,13 @@ data OperandTag = TagA | TagF | TagH | TagI | TagU
                 | TagFR | TagAtom | TagFloat | TagLiteral
      
 data Operand = IOperand Integer
+             | UOperand Integer
+             | XOperand Integer
              | AOperand Atom
+             | LOperand Literal
   deriving Show
+
+type Literal = ChunkData
 
 
 main :: IO ()
@@ -66,10 +72,11 @@ readBEAMFile binary = runGet (getHeader >> getChunks) binary
 
 parseBEAMFile :: [Chunk] -> Maybe BEAMFile
 parseBEAMFile chunks =
-  do atoms   <- parseAtomChunk         <$> (lookup "Atom" chunks)
-     imports <- parseImportChunk atoms <$> (lookup "ImpT" chunks)
-     exports <- parseExportChunk atoms <$> (lookup "ExpT" chunks)
-     fundefs <- parseCodeChunk   atoms <$> (lookup "Code" chunks)
+  do atoms    <- parseAtomChunk                   <$> (lookup "Atom" chunks)
+     imports  <- parseImportChunk  atoms          <$> (lookup "ImpT" chunks)
+     exports  <- parseExportChunk  atoms          <$> (lookup "ExpT" chunks)
+     literals <- parseLiteralChunk                <$> (lookup "LitT" chunks)
+     fundefs  <- parseCodeChunk    atoms literals <$> (lookup "Code" chunks)
      return $ BEAMFile { beamFileAtoms   = atoms 
                        , beamFileFunDefs = fundefs 
                        , beamFileImports = imports 
@@ -91,10 +98,15 @@ parseAtomChunk =
 readListChunk :: Get a -> ChunkData -> [a]
 readListChunk m = runGet (readMany m)
 
-parseCodeChunk :: [Atom] -> ChunkData -> [FunDef]
-parseCodeChunk atoms =
+parseLiteralChunk :: ChunkData -> [ChunkData]
+parseLiteralChunk x =
+  readListChunk (getInt32 >>= getLazyByteString) (Zlib.decompress y)
+    where y = B.drop 4 x -- skip length of uncompressed data
+
+parseCodeChunk :: [Atom] -> [Literal] -> ChunkData -> [FunDef]
+parseCodeChunk atoms literals =
   runGet $ do verifyHeader
-              operations <- (readOperation atoms) `untilM` isEmpty
+              operations <- (readOperation literals atoms) `untilM` isEmpty
               return $ parseOperations atoms operations
     where verifyHeader =
             do getInt32 `expecting` ("code info length", 16)
@@ -105,8 +117,8 @@ parseCodeChunk atoms =
                skip 8 -- label & function counts
 
 parseOperations :: [Atom] -> [Operation] -> [FunDef]
-parseOperations atoms (_ : ("func_info", [AOperand m, AOperand f, IOperand a])
-                         : ("label", [IOperand entry]) : xs) =
+parseOperations atoms (_ : ("func_info", [AOperand m, AOperand f, UOperand a])
+                         : ("label", [UOperand entry]) : xs) =
   let (code, rest) = splitToNextFunctionLabel [] xs
   in FunDef f a entry code : parseOperations atoms rest
 parseOperations _ [] = []
@@ -123,19 +135,19 @@ splitToNextFunctionLabel acc ops =
 readAtom :: [Atom] -> Get Atom
 readAtom atoms = atomIndex atoms <$> getInt32
 
-readOperation :: [Atom] -> Get Operation
-readOperation atoms =
+readOperation :: [Literal] -> [Atom] -> Get Operation
+readOperation literals atoms =
   do (opcode, argCount) <- (opcodeInfo . fromIntegral) <$> getWord8
-     args <- replicateM argCount (readOperand atoms)
+     args <- replicateM argCount (readOperand literals atoms)
      return (opcode, args)
      
-readOperand :: [Atom] -> Get Operand
-readOperand atoms =
+readOperand :: [Literal] -> [Atom] -> Get Operand
+readOperand literals atoms =
   do taggedByte <- getInt8
      case parseTag taggedByte of
-       TagZ -> readZOperand taggedByte
+       TagZ -> readZOperand literals taggedByte
        TagA -> readAOperand atoms taggedByte
-       _    -> readIOperand taggedByte
+       _    -> readIntegralOperand taggedByte
      
 parseTag :: Integer -> OperandTag
 parseTag x =
@@ -152,29 +164,44 @@ parseTag x =
     
 readAOperand :: [Atom] -> Integer -> Get Operand
 readAOperand atoms tag =
-  do IOperand i <- readIOperand tag
+  do i <- readInteger tag
      return $ AOperand (case i of
                            0 -> Atom "nil"
                            _ -> atomIndex atoms i)
   
-readZOperand :: Integer -> Get Operand
-readZOperand tag =
-  fail "can't handle floats or lists yet"
+readZOperand :: [Literal] -> Integer -> Get Operand
+readZOperand literals tag =
+  case tag `shiftR` 4 of
+    4 -> do UOperand i <- getInt8 >>= readIntegralOperand
+            return $ LOperand (literalIndex literals i)
+    _ -> fail $ "readZOperand: ? " ++ show (tag `shiftR` 4)
   
-readIOperand :: Integer -> Get Operand
-readIOperand tag | tag .&. 0x8 == 0 =
-  return $ IOperand (tag `shiftR` 4)
-readIOperand tag | tag .&. 0x10 == 0 =
+readIntegralOperand :: Integer -> Get Operand
+readIntegralOperand tag =
+  do i <- readInteger tag
+     return $ (case parseTag tag of
+                  TagU -> UOperand
+                  TagI -> IOperand
+                  TagX -> XOperand
+                  _    -> error $ "readIntegralOperand: ? " ++ show tag) i
+      
+readInteger :: Integer -> Get Integer
+readInteger tag | tag .&. 0x8 == 0 =
+  return (tag `shiftR` 4)
+readInteger tag | tag .&. 0x10 == 0 =
   do b <- getInt8
-     return $ IOperand (((tag .&. 0xe0) `shiftL` 3) .|. b)
-readIOperand tag =
+     return (((tag .&. 0xe0) `shiftL` 3) .|. b)
+readInteger tag =
   fail "integer too big for me"
   
 
 -- Helper functions for BEAM data.
 
 atomIndex :: Integral a => [Atom] -> a -> Atom
-atomIndex atoms i = atoms !! (fromIntegral i - 1)
+atomIndex xs i = xs !! (fromIntegral i - 1)
+
+literalIndex :: Integral a => [Literal] -> a -> Literal
+literalIndex xs i = xs !! (fromIntegral i)
 
 
 -- Helper functions for reading binary stuff.
