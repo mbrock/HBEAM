@@ -24,11 +24,18 @@ type Chunk     = (String, ChunkData)
 type Opcode    = String
 type Operation = (Opcode, [Argument])
 
-newtype Atom = Atom String
-             deriving Show
+newtype Atom   = Atom String deriving Show
+                      
+type Arity     = Integer
+type Label     = Integer
+                                      
+data MFA       = MFA    Atom Atom  Arity deriving Show
+data Export    = Export Atom Arity Label deriving Show
       
-data BEAMFile = BEAMFile { beamFileAtoms :: [Atom] 
-                         , beamFileCode  :: [Operation] }
+data BEAMFile = BEAMFile { beamFileAtoms   :: [Atom] 
+                         , beamFileCode    :: [Operation] 
+                         , beamFileImports :: [MFA] 
+                         , beamFileExports :: [Export] }
               deriving Show
 
 data ArgumentTag = TagA | TagF | TagH | TagI | TagU
@@ -57,30 +64,41 @@ readBEAMFile binary = runGet (getHeader >> getChunks) binary
 
 parseBEAMFile :: [Chunk] -> Maybe BEAMFile
 parseBEAMFile chunks =
-  do atomChunk <- lookup "Atom" chunks
-     codeChunk <- lookup "Code" chunks
-     return $ BEAMFile { beamFileAtoms = parseAtomChunk atomChunk 
-                       , beamFileCode  = parseCodeChunk codeChunk }
+  do atoms   <- fmap parseAtomChunk (lookup "Atom" chunks)
+     imports <- fmap (parseImportChunk atoms) (lookup "ImpT" chunks)
+     exports <- fmap (parseExportChunk atoms) (lookup "ExpT" chunks)
+     codes   <- fmap parseCodeChunk (lookup "Code" chunks)
+     return $ BEAMFile { beamFileAtoms   = atoms 
+                       , beamFileCode    = codes 
+                       , beamFileImports = imports 
+                       , beamFileExports = exports }
      
+parseImportChunk :: [Atom] -> ChunkData -> [MFA]
+parseImportChunk atoms =
+  runGet (readMany (liftM3 MFA getAtom getAtom getInt32))
+    where getAtom = readAtom atoms
+     
+parseExportChunk :: [Atom] -> ChunkData -> [Export]
+parseExportChunk atoms =
+  runGet (readMany (liftM3 Export (readAtom atoms) getInt32 getInt32))
+  
 parseAtomChunk :: ChunkData -> [Atom]
-parseAtomChunk chunk = flip runGet chunk $
-  do count <- getInt32
-     replicateM count (getWord8 >>= getString >>= return . Atom)
+parseAtomChunk =
+  runGet (readMany $ getWord8 >>= getString >>= return . Atom)
 
 parseCodeChunk :: ChunkData -> [Operation]
-parseCodeChunk chunk = flip runGet chunk $
-  do infoLength <- getInt32
-     unless (infoLength == 16) $
-       fail ("weird code info length: " ++ show infoLength)
-     instrSet <- getInt32
-     unless (instrSet == 0) $
-       fail ("weird instruction set id: " ++ show instrSet)
-     maxOpcode' <- getInt32
-     unless (maxOpcode' <= maxOpcode) $
-       fail ("max opcode too big: " ++ show maxOpcode')
-     skip 8 -- label & function counts
-     readOperation `untilM` isEmpty
+parseCodeChunk =
+  runGet $ do getInt32 `expecting` ("code info length", 16)
+              getInt32 `expecting` ("instruction set", 0)
+              maxOpcode' <- getInt32
+              unless (maxOpcode' <= maxOpcode) $
+                fail ("max opcode too big: " ++ show maxOpcode')
+              skip 8 -- label & function counts
+              readOperation `untilM` isEmpty
      
+readAtom :: [Atom] -> Get Atom
+readAtom atoms = fmap ((atoms !!) . (subtract 1)) getInt32
+
 readOperation :: Get Operation
 readOperation =
   do (opcode, argCount) <- fmap (opcodeInfo . fromIntegral) getWord8
@@ -142,7 +160,16 @@ getInt32 = fmap fromIntegral getWord32be
 getInt8 :: Integral a => Get a
 getInt8 = fmap fromIntegral getWord8
 
+readMany :: Get a -> Get [a]
+readMany m = getInt32 >>= flip replicateM m
+
 align :: Int -> Get ()
 align n =
   do m <- fmap fromIntegral bytesRead
      skip ((((m + n - 1) `div` n) * n) - m)
+
+expecting :: (Eq a, Show a) => Get a -> (String, a) -> Get ()
+expecting m (name, x) =
+  do y <- m
+     unless (y == x) (fail ("Wrong " ++ name ++ ": expected " ++
+                            show x ++ ", not " ++ show y))
