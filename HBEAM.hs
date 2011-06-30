@@ -29,6 +29,8 @@ data External  = UnparsedLiteral B.ByteString
                | ExtInteger Integer
                | ExtTuple [External]
                | ExtAtom String
+               | ExtString String
+               | ExtList [External]
                deriving Show
 
 newtype Atom   = Atom String deriving Show
@@ -118,6 +120,9 @@ readExternal =
        'a' -> ExtInteger <$> getInt8
        'h' -> ExtTuple <$> (readMany8 readExternal)
        'd' -> ExtAtom <$> (getWord16be >>= getString)
+       'k' -> ExtString <$> (getWord16be >>= getString)
+       'l' -> ExtList <$> (readMany32 readExternal)
+       'j' -> return (ExtList [])
        _   -> fail $ "readExternal: can't do tag " ++ show tag
 
 parseCodeChunk :: [Atom] -> [External] -> ChunkData -> [FunDef]
