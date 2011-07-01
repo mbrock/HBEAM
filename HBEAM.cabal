@@ -12,5 +12,5 @@ Executable hbeam
   hs-source-dirs: src
   Main-is: Main.hs
   Build-Depends: base >= 3 && < 5, binary, bytestring, text, monad-loops,
-                 zlib
+                 zlib, array, containers
   ghc-options: -Wall

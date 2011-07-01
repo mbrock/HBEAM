@@ -33,7 +33,7 @@ data External  = ExtInteger Integer
                | ExtList    [External]
                deriving Show
 
-newtype Atom   = Atom String deriving Show
+newtype Atom   = Atom String deriving (Show, Ord, Eq)
                       
 type Arity     = Integer
 type Label     = Integer
@@ -139,7 +139,7 @@ parseCodeChunk atoms literals =
 
 parseOperations :: [Atom] -> [Operation] -> [FunDef]
 parseOperations atoms (_ : ("func_info", [AOperand _, AOperand f, UOperand a])
-                         : ("label", [UOperand entry]) : xs) =
+                         : xs@(("label", [UOperand entry]) : _)) =
   let (code, rest) = splitToNextFunctionLabel [] xs
   in FunDef f a entry code : parseOperations atoms rest
 parseOperations _ [] = []
