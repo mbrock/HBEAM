@@ -5,7 +5,7 @@ import Language.Erlang.BEAM.Opcodes
 import qualified Data.ByteString.Lazy as B
 import qualified Codec.Compression.Zlib as Zlib
 
-import Data.Binary
+import Data.Binary ()
 import Data.Binary.Get
 
 import Data.Char
@@ -70,7 +70,7 @@ readBEAMFile binary = runGet (getHeader >> getChunks) binary
     getHeader = skip 12
     getChunks = getChunk `untilM` isEmpty
     getChunk  =
-      do name    <- getString 4
+      do name    <- getString (4 :: Int)
          content <- getInt32 >>= getLazyByteString
          align 4
          return (name, content)
@@ -111,7 +111,7 @@ parseLiteralChunk x =
           
 parseLiteral :: ChunkData -> External
 parseLiteral = runGet (verify >> readExternal)
-  where verify = getInt8 `expecting` ("external version magic", 131)
+  where verify = getInt8 `expecting` ("external version magic", 131 :: Int)
         
 readExternal :: Get External
 readExternal =
@@ -131,19 +131,21 @@ parseCodeChunk atoms literals =
               operations <- (readOperation literals atoms) `untilM` isEmpty
               return $ parseOperations atoms operations
     where verifyHeader =
-            do getInt32 `expecting` ("code info length", 16)
-               getInt32 `expecting` ("instruction set", 0)
+            do getInt32 `expecting` ("code info length", 16 :: Int)
+               getInt32 `expecting` ("instruction set", 0 :: Int)
                maxOpcode' <- getInt32
                unless (maxOpcode' <= maxOpcode) $
                  fail ("max opcode too big: " ++ show maxOpcode')
                skip 8 -- label & function counts
 
 parseOperations :: [Atom] -> [Operation] -> [FunDef]
-parseOperations atoms (_ : ("func_info", [AOperand m, AOperand f, UOperand a])
+parseOperations atoms (_ : ("func_info", [AOperand _, AOperand f, UOperand a])
                          : ("label", [UOperand entry]) : xs) =
   let (code, rest) = splitToNextFunctionLabel [] xs
   in FunDef f a entry code : parseOperations atoms rest
 parseOperations _ [] = []
+parseOperations _ xs =
+  error $ "parseOperations: misformed function " ++ show xs
 
 splitToNextFunctionLabel :: [Operation] -> [Operation] ->
                             ([Operation], [Operation])
@@ -155,7 +157,7 @@ splitToNextFunctionLabel acc ops =
     []                         -> error "code chunk ended prematurely"
      
 readAtom :: [Atom] -> Get Atom
-readAtom atoms = atomIndex atoms <$> getInt32
+readAtom atoms = atomIndex atoms <$> (getInt32 :: Get Int)
 
 readOperation :: [External] -> [Atom] -> Get Operation
 readOperation literals atoms =
@@ -215,7 +217,7 @@ readInteger tag | tag .&. 0x8 == 0 =
 readInteger tag | tag .&. 0x10 == 0 =
   do b <- getInt8
      return (((tag .&. 0xe0) `shiftL` 3) .|. b)
-readInteger tag =
+readInteger _ =
   fail "integer too big for me"
   
 

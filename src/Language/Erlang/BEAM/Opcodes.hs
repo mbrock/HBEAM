@@ -1,5 +1,6 @@
 module Language.Erlang.BEAM.Opcodes where
 
+opcodeInfo :: Int -> (String, Int)
 opcodeInfo 1 = ("label", 1)
 opcodeInfo 2 = ("func_info", 3)
 opcodeInfo 3 = ("int_code_end", 0)
@@ -154,4 +155,5 @@ opcodeInfo 151 = ("recv_set", 1)
 opcodeInfo 152 = ("gc_bif3", 7)
 opcodeInfo n = error $ "no such opcode " ++ show n
 
+maxOpcode :: Integer
 maxOpcode = 152

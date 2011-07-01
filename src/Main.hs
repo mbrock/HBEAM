@@ -12,7 +12,7 @@ main = do Just x <- (parseBEAMFile . readBEAMFile) <$> B.getContents
           mapM_ (\(i, MFA (Atom m) (Atom f) a) ->
                   putStrLn ("    " ++ show i ++ ": " ++ m ++ ":" ++ f
                             ++ "/" ++ show a))
-            (zip [0..] (beamFileImports x))
+            (zip [(0::Int)..] (beamFileImports x))
           putStrLn ""
           putStrLn "Exports: "
           mapM_ (\(Export (Atom f) a e) ->

@@ -1,7 +1,9 @@
-puts "module Opcodes where"
+puts "module Language.Erlang.BEAM.Opcodes where"
 puts
 
 max_opcode = 0
+
+puts "opcodeInfo :: Int -> (String, Int)"
 
 STDIN.each_line do |line|
   case line
@@ -18,4 +20,5 @@ end
 puts 'opcodeInfo n = error $ "no such opcode " ++ show n'
 
 puts
+puts "maxOpcode :: Integer"
 puts "maxOpcode = #{max_opcode}"
