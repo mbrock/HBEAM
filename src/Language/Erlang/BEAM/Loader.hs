@@ -77,15 +77,15 @@ readBEAMFile binary = runGet (getHeader >> getChunks) binary
 
 parseBEAMFile :: [Chunk] -> Maybe BEAMFile
 parseBEAMFile chunks =
-  do atoms    <- parseAtomChunk                   <$> (lookup "Atom" chunks)
-     imports  <- parseImportChunk  atoms          <$> (lookup "ImpT" chunks)
-     exports  <- parseExportChunk  atoms          <$> (lookup "ExpT" chunks)
+  do atoms    <- parseAtomChunk                   <$> lookup "Atom" chunks
+     imports  <- parseImportChunk  atoms          <$> lookup "ImpT" chunks
+     exports  <- parseExportChunk  atoms          <$> lookup "ExpT" chunks
      let literals = maybe [] parseLiteralChunk (lookup "LitT" chunks)
-     fundefs  <- parseCodeChunk    atoms literals <$> (lookup "Code" chunks)
-     return $ BEAMFile { beamFileAtoms   = atoms 
-                       , beamFileFunDefs = fundefs 
-                       , beamFileImports = imports 
-                       , beamFileExports = exports }
+     fundefs  <- parseCodeChunk    atoms literals <$> lookup "Code" chunks
+     return BEAMFile { beamFileAtoms   = atoms 
+                     , beamFileFunDefs = fundefs 
+                     , beamFileImports = imports 
+                     , beamFileExports = exports }
      
 parseImportChunk :: [Atom] -> ChunkData -> [MFA]
 parseImportChunk atoms =
@@ -94,19 +94,18 @@ parseImportChunk atoms =
      
 parseExportChunk :: [Atom] -> ChunkData -> [Export]
 parseExportChunk atoms =
-  readListChunk $ Export <$> (readAtom atoms) <*> getInt32 <*> getInt32
+  readListChunk $ Export <$> readAtom atoms <*> getInt32 <*> getInt32
   
 parseAtomChunk :: ChunkData -> [Atom]
 parseAtomChunk =
-  readListChunk $ getWord8 >>= getString >>= return . Atom
+  readListChunk $ Atom <$> (getWord8 >>= getString)
   
 readListChunk :: Get a -> ChunkData -> [a]
 readListChunk m = runGet (readMany32 m)
 
 parseLiteralChunk :: ChunkData -> [External]
 parseLiteralChunk x =
-  readListChunk (getInt32 >>= getLazyByteString >>=
-                 return . parseLiteral) y
+  readListChunk (parseLiteral <$> (getInt32 >>= getLazyByteString)) y
     where y = Zlib.decompress $ B.drop 4 x
           
 parseLiteral :: ChunkData -> External
@@ -118,17 +117,17 @@ readExternal =
   do tag <- getLatin1Char
      case tag of
        'a' -> ExtInteger <$> getInt8
-       'h' -> ExtTuple   <$> (readMany8 readExternal)
+       'h' -> ExtTuple   <$> readMany8 readExternal
        'd' -> ExtAtom    <$> (getWord16be >>= getString)
        'k' -> ExtString  <$> (getWord16be >>= getString)
-       'l' -> ExtList    <$> (readMany32 readExternal)
-       'j' -> ExtList    <$> (return [])
+       'l' -> ExtList    <$> readMany32 readExternal
+       'j' -> ExtList    <$> return []
        _   -> fail $ "readExternal: can't do tag " ++ show tag
 
 parseCodeChunk :: [Atom] -> [External] -> ChunkData -> [FunDef]
 parseCodeChunk atoms literals =
   runGet $ do verifyHeader
-              operations <- (readOperation literals atoms) `untilM` isEmpty
+              operations <- readOperation literals atoms `untilM` isEmpty
               return $ parseOperations atoms operations
     where verifyHeader =
             do getInt32 `expecting` ("code info length", 16 :: Int)
@@ -227,14 +226,13 @@ atomIndex :: Integral a => [Atom] -> a -> Atom
 atomIndex xs i = xs !! (fromIntegral i - 1)
 
 literalIndex :: Integral a => [External] -> a -> External
-literalIndex xs i = xs !! (fromIntegral i)
+literalIndex xs i = xs !! fromIntegral i
 
 
 -- Helper functions for reading binary stuff.
 
 getString :: Integral a => a -> Get String
-getString n =
-  getLazyByteString (fromIntegral n) >>= return . unpackByteString
+getString n = unpackByteString <$> getLazyByteString (fromIntegral n)
 
 unpackByteString :: B.ByteString -> String
 unpackByteString = T.unpack . decodeASCII
