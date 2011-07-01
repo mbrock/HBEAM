@@ -30,9 +30,7 @@ main = do Just x <- (parseBEAMFile . readBEAMFile) <$> B.getContents
           putStrLn ""
           let node = nodeFromBEAMFile x
               mfa = MFA (Atom "mymath") (Atom "factorial") 1
-              args = [EVInteger 4]
+              args = [EVInteger 10]
           putStrLn $ "Spawning " ++ showMFA mfa ++ "."
           spawnProcess node mfa args
           
-showMFA :: MFA -> String
-showMFA (MFA (Atom m) (Atom f) a) = m ++ ":" ++ f ++ "/" ++ show a
