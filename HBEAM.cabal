@@ -9,5 +9,8 @@ Build-Type: Simple
 Cabal-Version: >=1.2
 
 Executable hbeam
-  Main-is: HBEAM.hs
-  Build-Depends: base >= 3 && < 5, binary, bytestring, text, monad-loops
+  hs-source-dirs: src
+  Main-is: Main.hs
+  Build-Depends: base >= 3 && < 5, binary, bytestring, text, monad-loops,
+                 zlib
+  ghc-options: -Wall

@@ -1,4 +1,6 @@
-module Main where
+module Language.Erlang.BEAM.Loader where
+
+import Language.Erlang.BEAM.Opcodes
 
 import qualified Data.ByteString.Lazy as B
 import qualified Codec.Compression.Zlib as Zlib
@@ -17,8 +19,6 @@ import Data.Text.Lazy.Encoding
 import Control.Monad
 import Control.Monad.Loops
 import Control.Applicative
-
-import Opcodes
 
 type ChunkData = B.ByteString
 type Chunk     = (String, ChunkData)
@@ -63,14 +63,6 @@ data Operand = IOperand Integer
              | AOperand Atom
              | LOperand External
              deriving Show
-
-main :: IO ()
-main = do Just x <- (parseBEAMFile . readBEAMFile) <$> B.getContents
-          mapM_ (\(FunDef (Atom name) arity label ops) ->
-                  do putStrLn (name ++ "/" ++ show arity ++ " (@" ++
-                               show label ++ "):")
-                     mapM_ (\op -> putStrLn ("    " ++ show op)) ops
-                     putStrLn "") (beamFileFunDefs x)
      
 readBEAMFile :: ChunkData -> [Chunk]
 readBEAMFile binary = runGet (getHeader >> getChunks) binary

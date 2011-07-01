@@ -1,4 +1,4 @@
-module Opcodes where
+module Language.Erlang.BEAM.Opcodes where
 
 opcodeInfo 1 = ("label", 1)
 opcodeInfo 2 = ("func_info", 3)
