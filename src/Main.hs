@@ -1,5 +1,7 @@
 module Main where 
 
+import System.Environment (getArgs)
+
 import Language.Erlang.BEAM.Loader
 import Language.Erlang.BEAM.Emulator
 
@@ -28,9 +30,10 @@ main = do Just x <- (parseBEAMFile . readBEAMFile) <$> B.getContents
                      putStrLn "") (beamFileFunDefs x)
 
           putStrLn ""
+          [m', f', a', args'] <- getArgs
           let node = nodeFromBEAMFile x
-              mfa = MFA (Atom "mymath") (Atom "factorial") 1
-              args = [EVInteger 10]
+              mfa = MFA (Atom m') (Atom f') (read a')
+              args = read args'
           putStrLn $ "Spawning " ++ showMFA mfa ++ "."
           spawnProcess node mfa args
           

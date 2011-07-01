@@ -14,7 +14,7 @@ import Control.Applicative
 import Control.Monad
 
 data EValue = EVInteger Integer
-            deriving (Show, Eq)
+            deriving (Show, Eq, Read)
 
 data Function = Function { functionArity  :: Integer
                          , functionLabels :: Map Integer [Operation]
