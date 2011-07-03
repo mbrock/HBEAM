@@ -7,6 +7,8 @@ import Language.Erlang.BEAM.Loader
 import Data.Map (Map)
 import qualified Data.Map as Map
 
+import Data.Char (ord)
+
 import Data.Array.IO
 import Data.Array.MArray
 
@@ -17,10 +19,13 @@ import Control.Monad
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Reader
 
-import Control.Concurrent.Chan
+import Control.Monad.STM
+import Control.Concurrent
+import Control.Concurrent.STM.TChan
 
 data EValue = EVInteger Integer
             | EVAtom Atom
+            | EVList [EValue]
             | EVPID PID
             deriving (Show, Eq, Read)
                      
@@ -51,7 +56,7 @@ data Process = Process { procRegs     :: IOArray Int EValue
                        , procSP       :: IORef Int 
                        , procRetStack :: IORef [CodePointer] 
                        , procPID      :: PID 
-                       , procMailbox  :: Chan EValue }
+                       , procMailbox  :: TChan EValue }
                
 data EmulationCtx = EmulationCtx { emuNode     :: Node
                                  , emuProcess  :: Process
@@ -93,7 +98,7 @@ splitBlocks [] = Map.empty
 splitBlocks (("label", [UOperand i]) : os) = Map.insert i os (splitBlocks os)
 splitBlocks (_:os) = splitBlocks os
 
-spawnProcess :: Node -> MFA -> [EValue] -> IO ()
+spawnProcess :: Node -> MFA -> [EValue] -> IO PID
 spawnProcess n mfa args =
   do pid <- readIORef (nodeNextPID n)
      modifyIORef (nodeNextPID n) (+ 1)
@@ -102,14 +107,16 @@ spawnProcess n mfa args =
                   <*> newIORef 0
                   <*> newIORef [[]]
                   <*> return pid
-                  <*> newChan
+                  <*> atomically newTChan
      modifyIORef (nodePIDs n) (Map.insert pid p)
      let Just f = findMFA n mfa
-     result <- runReaderT (moveArgsToRegs args >> call >> getReg 0)
-       (EmulationCtx { emuNode = n
-                     , emuProcess = p
-                     , emuFunction = f })
-     putStrLn $ "Return value: " ++ show result
+     forkIO $ do
+       result <- runReaderT (moveArgsToRegs args >> call >> getReg 0)
+                   (EmulationCtx { emuNode = n
+                                 , emuProcess = p
+                                 , emuFunction = f })
+       putStrLn $ "PROCESS " ++ show pid ++ ": " ++ show result
+     return pid
          
 findMFA :: Node -> MFA -> Maybe Function
 findMFA node (MFA m f a) =
@@ -196,6 +203,11 @@ interpret1 o os =
          (a', b') <- (,) <$> getOperand a <*> getOperand b
          bif [a', b'] >>= setOperand dest
          interpret os
+    ("call_ext", [UOperand n, UOperand i]) ->
+      do ext <- getImportedFunction i
+         args <- mapM (getOperand . XOperand) [0..(n-1)]
+         ext args >>= setOperand (XOperand 0)
+         interpret os
     ("move", [src, dest]) ->
       do getOperand src >>= setOperand dest
          interpret os
@@ -204,6 +216,9 @@ interpret1 o os =
     ("call", [_, FOperand label]) ->
       do pushRetStack os
          callByLabel label
+    ("call_last", [_, FOperand label, UOperand dealloc]) ->
+      do advanceSP (- (fromIntegral dealloc))
+         jump label
     ("return", []) ->
       do pc' <- popRetStack
          interpret pc'
@@ -217,29 +232,38 @@ interpret1 o os =
          interpret os
     ("loop_rec", [FOperand label, dest]) ->
       do mailbox <- asks (procMailbox . emuProcess)
-         noMail <- liftIO $ isEmptyChan mailbox
+         noMail <- liftIO $ atomically (isEmptyTChan mailbox)
          if noMail
            then jump label
-           else do x <- liftIO $ readChan mailbox
-                   liftIO $ unGetChan mailbox x
+           else do x <- liftIO $ atomically $ 
+                          do x' <- readTChan mailbox
+                             unGetTChan mailbox x'
+                             return x'
                    setOperand dest x
                    interpret os
     ("remove_message", []) ->
       do mailbox <- asks (procMailbox . emuProcess)
-         liftIO $ readChan mailbox
+         liftIO $ atomically $ readTChan mailbox
          interpret os
     ("wait", [FOperand label]) ->
       do mailbox <- asks (procMailbox . emuProcess)
-         liftIO $ do x <- readChan mailbox
-                     unGetChan mailbox x
+         liftIO $ atomically $ do x <- readTChan mailbox
+                                  unGetTChan mailbox x
          jump label
+    ("put_list", [car, cdr, dest]) ->
+      do car' <- getOperand car
+         EVList cdr' <- getOperand cdr
+         setOperand dest (EVList (car':cdr'))
+         interpret os
+    ("test_heap", _) ->
+      do interpret os
     _ ->
       do fail $ "unhandled instruction: " ++ show o
          
 send :: PID -> EValue -> Emulation ()
 send pid x =
   do p <- lookupPID pid
-     liftIO $ writeChan (procMailbox p) x
+     liftIO $ atomically $ writeTChan (procMailbox p) x
      
 lookupPID :: PID -> Emulation Process
 lookupPID pid =
@@ -252,6 +276,21 @@ allocate size =
      ensureStackSize (fromIntegral (fromIntegral size + sp))
      advanceSP (fromIntegral size)
 
+getImportedFunction :: Integer -> Emulation ([EValue] -> Emulation EValue)
+getImportedFunction i =
+  do thisModule <- asks emuModule
+     case moduleImports thisModule !! fromIntegral i of
+       MFA (Atom "erlang") (Atom "spawn") 3 ->
+         return $ \[EVAtom m, EVAtom f, EVList args] ->
+                    do n <- asks emuNode
+                       let mfa = MFA m f (fromIntegral (length args))
+                       pid <- liftIO $ spawnProcess n mfa args
+                       return (EVPID pid)
+       MFA (Atom "hbeam") (Atom "display") _ ->
+         return $ \xs -> do liftIO $ putStrLn ("!! " ++ show xs)
+                            return (EVInteger 0)
+       mfa -> fail $ "no such imported function " ++ showMFA mfa
+
 getBIF :: Integer -> Emulation ([EValue] -> Emulation EValue)
 getBIF i =
   do f <- asks emuFunction
@@ -259,6 +298,8 @@ getBIF i =
      case (moduleImports (functionModule f)) !! (fromIntegral i) of
        MFA (Atom "erlang") (Atom "-") 2 ->
          return $ \([EVInteger x, EVInteger y]) -> return (EVInteger (x - y))
+       MFA (Atom "erlang") (Atom "+") 2 ->
+         return $ \([EVInteger x, EVInteger y]) -> return (EVInteger (x + y))
        MFA (Atom "erlang") (Atom "*") 2 ->
          return $ \([EVInteger x, EVInteger y]) -> return (EVInteger (x * y))
        MFA (Atom "erlang") (Atom "self") 0 ->
@@ -284,6 +325,8 @@ getOperand o =
     XOperand i -> getReg (fromIntegral i)
     YOperand i -> getStack (fromIntegral i)
     AOperand a -> return (EVAtom a)
+    LOperand (ExtString s) ->
+      return (EVList (map (EVInteger . fromIntegral . ord) s))
     _          -> fail $ "getOperand: " ++ show o
     
 setOperand :: Operand -> EValue -> Emulation ()

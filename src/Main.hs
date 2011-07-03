@@ -9,6 +9,8 @@ import qualified Data.ByteString.Lazy as B
 
 import Control.Applicative
 
+import Control.Concurrent (threadDelay)
+
 main :: IO ()
 main = do Just x <- (parseBEAMFile . readBEAMFile) <$> B.getContents
           putStrLn "Imports: "
@@ -36,4 +38,8 @@ main = do Just x <- (parseBEAMFile . readBEAMFile) <$> B.getContents
               args = read args'
           putStrLn $ "Spawning " ++ showMFA mfa ++ "."
           spawnProcess node mfa args
+          
+          threadDelay 3000000
+          
+          return ()
           
