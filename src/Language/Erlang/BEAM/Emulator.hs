@@ -12,6 +12,8 @@ import Data.IORef
 
 import Control.Applicative
 import Control.Monad
+import Control.Monad.IO.Class
+import Control.Monad.Trans.Reader
 
 data EValue = EVInteger Integer
             deriving (Show, Eq, Read)
@@ -39,6 +41,15 @@ data Process = Process { procRegs     :: IOArray Int EValue
                        , procSP       :: IORef Int 
                        , procRetStack :: IORef [CodePointer] }
                
+data EmulationCtx = EmulationCtx { emuNode     :: Node
+                                 , emuProcess  :: Process
+                                 , emuFunction :: Function }
+               
+type Emulation a = ReaderT EmulationCtx IO a
+               
+emuModule :: EmulationCtx -> Module
+emuModule = functionModule . emuFunction
+
 nodeFromBEAMFile :: BEAMFile -> Node
 nodeFromBEAMFile b =
   Node { nodeAtoms = beamFileAtoms b
@@ -73,9 +84,10 @@ spawnProcess node mfa args =
                   <*> newIORef 0
                   <*> newIORef [[]]
      let Just f = findMFA node mfa
-     moveArgsToRegs p args
-     call node p f
-     result <- getReg p 0
+     result <- runReaderT (moveArgsToRegs args >> call >> getReg 0)
+       (EmulationCtx { emuNode = node
+                     , emuProcess = p
+                     , emuFunction = f })
      putStrLn $ "Return value: " ++ show result
          
 findMFA :: Node -> MFA -> Maybe Function
@@ -83,116 +95,139 @@ findMFA node (MFA m f a) =
   do m' <- Map.lookup m (nodeModules node)
      Map.lookup (f, a) (moduleFunctions m')
 
-call :: Node -> Process -> Function -> IO ()
-call n p f = callByLabel n p (functionModule f) (functionEntry f)
+call :: Emulation ()
+call = do f <- asks emuFunction
+          callByLabel (functionEntry f)
      
-moveArgsToRegs :: Process -> [EValue] -> IO ()
-moveArgsToRegs p args = forM_ (zip [0..] args) (\(i, x) -> setReg p i x)
+moveArgsToRegs :: [EValue] -> Emulation ()
+moveArgsToRegs args = forM_ (zip [0..] args) (\(i, x) -> setReg i x)
              
-callByLabel :: Node -> Process -> Module -> Label -> IO ()
-callByLabel node p m label =
-  do let f = moduleEntries m Map.! label
-     let code = functionLabels f Map.! label
-     interpret node p f code
+callByLabel :: Label -> Emulation ()
+callByLabel label =
+  do m <- asks emuModule
+     let f    = moduleEntries m Map.! label
+         code = functionLabels f Map.! label
+     local (\c -> c { emuFunction = f }) (interpret code)
      
-setReg :: Process -> Int -> EValue -> IO ()
-setReg p i x = do writeArray (procRegs p) i x
-                  putStrLn $ ">> x " ++ show i ++ " := " ++ show x
+setReg :: Int -> EValue -> Emulation ()
+setReg i x = do asks emuProcess >>= \p -> liftIO $ writeArray (procRegs p) i x
+                liftIO . putStrLn $ ">> x " ++ show i ++ " := " ++ show x
 
-setStack :: Process -> Int -> EValue -> IO ()
-setStack p i x = do stack <- readIORef (procStack p)
+setStack :: Int -> EValue -> Emulation ()
+setStack i x = do p <- asks emuProcess
+                  liftIO $ do
+                    stack <- readIORef (procStack p)
                     sp <- readIORef (procSP p)
                     writeArray stack (sp - i) x
                     putStrLn $ ">> y " ++ show sp ++ "-" ++ show i ++
-                               " := " ++ show x
+                      " := " ++ show x
 
+getReg :: Int -> Emulation EValue
+getReg i = asks emuProcess >>= \p -> liftIO $ readArray (procRegs p) i
 
-getReg :: Process -> Int -> IO EValue
-getReg p i = readArray (procRegs p) i
-
-getStack :: Process -> Int -> IO EValue
-getStack p i = do stack <- readIORef (procStack p)
+getStack :: Int -> Emulation EValue
+getStack i = do p <- asks emuProcess
+                liftIO $ do
+                  stack <- readIORef (procStack p)
                   sp <- readIORef (procSP p)
                   readArray stack (sp - i)
 
+interpret :: [Operation] -> Emulation ()
+interpret []     = return ()
+interpret (o:os) =
+  do liftIO $ print o
+     interpret1 o os
 
-interpret :: Node -> Process -> Function -> [Operation] -> IO ()
-interpret _ _ _ []     = return ()
-interpret n p f (o:os) =
-  do print o
-     interpret1 n p f o os
+getSP :: Emulation Int
+getSP = asks emuProcess >>= liftIO . readIORef . procSP
 
-interpret1 :: Node -> Process -> Function -> Operation -> [Operation] -> IO ()
-interpret1 n p f o os =
+advanceSP :: Int -> Emulation ()
+advanceSP n = asks emuProcess >>= \p -> liftIO (modifyIORef (procSP p) (+ n))
+
+pushRetStack :: CodePointer -> Emulation ()
+pushRetStack cp =
+  asks emuProcess >>= \p -> liftIO (modifyIORef (procRetStack p) (cp:))
+
+popRetStack :: Emulation CodePointer
+popRetStack = do p <- asks emuProcess
+                 (pc':pcs) <- liftIO $ readIORef (procRetStack p)
+                 liftIO $ writeIORef (procRetStack p) pcs
+                 return pc'
+
+interpret1 :: Operation -> [Operation] -> Emulation ()
+interpret1 o os =
   case o of
     ("is_eq_exact", [FOperand label, a, b]) ->
-      do (a', b') <- (,) <$> getOperand p a <*> getOperand p b
+      do (a', b') <- (,) <$> getOperand a <*> getOperand b
          if a' == b'
-           then interpret n p f os
-           else jump n p f label
+           then interpret os
+           else jump label
     ("allocate_zero", [UOperand size, _]) ->
-      do sp <- readIORef (procSP p)
-         ensureStackSize p (fromIntegral (fromIntegral size + sp))
-         modifyIORef (procSP p) (+ fromIntegral size)
-         interpret n p f os
+      do sp <- getSP
+         ensureStackSize (fromIntegral (fromIntegral size + sp))
+         advanceSP (fromIntegral size)
+         interpret os
     ("gc_bif2", [_, _, UOperand i, a, b, dest]) ->
-      do let bif = getBIF f i
-         (a', b') <- (,) <$> getOperand p a <*> getOperand p b
-         setOperand p dest (bif [a', b'])
-         interpret n p f os
+      do bif <- getBIF i
+         (a', b') <- (,) <$> getOperand a <*> getOperand b
+         setOperand dest (bif [a', b'])
+         interpret os
     ("move", [src, dest]) ->
-      do getOperand p src >>= setOperand p dest
-         interpret n p f os
+      do getOperand src >>= setOperand dest
+         interpret os
     ("call", [_, FOperand label]) ->
-      do modifyIORef (procRetStack p) (\rs -> os:rs)
-         callByLabel n p (functionModule f) label
+      do pushRetStack os
+         callByLabel label
     ("return", []) ->
-      do (pc':pcs) <- readIORef (procRetStack p)
-         writeIORef (procRetStack p) pcs
-         interpret n p f pc'
+      do pc' <- popRetStack
+         interpret pc'
     ("deallocate", [UOperand m]) ->
-      do modifyIORef (procSP p) (subtract (fromIntegral m))
-         interpret n p f os
+      do advanceSP (- (fromIntegral m))
+         interpret os
     _ ->
-      do print "  dunno"
-         interpret n p f os
+      do liftIO $ print "  dunno"
+         interpret os
          
-getBIF :: Function -> Integer -> ([EValue] -> EValue)
-getBIF f i = case (moduleImports (functionModule f)) !! (fromIntegral i) of
-  MFA (Atom "erlang") (Atom "-") 2 ->
-    \([EVInteger x, EVInteger y]) -> EVInteger (x - y)
-  MFA (Atom "erlang") (Atom "*") 2 ->
-    \([EVInteger x, EVInteger y]) -> EVInteger (x * y)
-  mfa -> error $ "no BIF for " ++ showMFA mfa
+getBIF :: Integer -> Emulation ([EValue] -> EValue)
+getBIF i =
+  do f <- asks emuFunction
+     case (moduleImports (functionModule f)) !! (fromIntegral i) of
+       MFA (Atom "erlang") (Atom "-") 2 ->
+         return $ \([EVInteger x, EVInteger y]) -> EVInteger (x - y)
+       MFA (Atom "erlang") (Atom "*") 2 ->
+         return $ \([EVInteger x, EVInteger y]) -> EVInteger (x * y)
+       mfa -> fail $ "no BIF for " ++ showMFA mfa
                 
-ensureStackSize :: Process -> Integer -> IO ()
-ensureStackSize p n =
-  do stack <- readIORef (procStack p)
-     size <- ((+ 1) . snd) <$> getBounds stack
-     print (size, n)
-     when (fromIntegral size <= n)
-       (do newStack <- newArray (0, fromIntegral n * 2) (EVInteger 0)
-           forM_ [0..(size - 1)]
-             (\i -> readArray stack i >>= writeArray newStack i)
-           writeIORef (procStack p) newStack)
-           
-getOperand :: Process -> Operand -> IO EValue
-getOperand p o =
+ensureStackSize :: Integer -> Emulation () 
+ensureStackSize n =
+  do p <- asks emuProcess
+     liftIO $ do
+       stack <- readIORef (procStack p)
+       size <- ((+ 1) . snd) <$> getBounds stack
+       when (fromIntegral size <= n)
+         (do newStack <- newArray (0, fromIntegral n * 2) (EVInteger 0)
+             forM_ [0..(size - 1)]
+               (\i -> readArray stack i >>= writeArray newStack i)
+             writeIORef (procStack p) newStack)
+             
+getOperand :: Operand -> Emulation EValue
+getOperand o =
   case o of
     IOperand x -> return (EVInteger x)
-    XOperand i -> getReg p (fromIntegral i)
-    YOperand i -> getStack p (fromIntegral i)
-    _          -> error $ "getOperand: " ++ show o
+    XOperand i -> getReg (fromIntegral i)
+    YOperand i -> getStack (fromIntegral i)
+    _          -> fail $ "getOperand: " ++ show o
     
-setOperand :: Process -> Operand -> EValue -> IO ()
-setOperand p o v =
+setOperand :: Operand -> EValue -> Emulation ()
+setOperand o v =
   case o of
-    XOperand i -> setReg p (fromIntegral i) v
-    YOperand i -> setStack p (fromIntegral i) v
-    _          -> error $ "setOperand: " ++ show (o, v)
+    XOperand i -> setReg (fromIntegral i) v
+    YOperand i -> setStack (fromIntegral i) v
+    _          -> fail $ "setOperand: " ++ show (o, v)
     
-jump :: Node -> Process -> Function -> Label -> IO ()
-jump n p f label = interpret n p f (functionLabels f Map.! label)
+jump :: Label -> Emulation ()
+jump label = do f <- asks emuFunction
+                interpret (functionLabels f Map.! label)
 
 showMFA :: MFA -> String
 showMFA (MFA (Atom m) (Atom f) a) = m ++ ":" ++ f ++ "/" ++ show a
