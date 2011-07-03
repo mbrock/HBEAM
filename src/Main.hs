@@ -31,8 +31,8 @@ main = do Just x <- (parseBEAMFile . readBEAMFile) <$> B.getContents
 
           putStrLn ""
           [m', f', a', args'] <- getArgs
-          let node = nodeFromBEAMFile x
-              mfa = MFA (Atom m') (Atom f') (read a')
+          node <- nodeFromBEAMFile x
+          let mfa = MFA (Atom m') (Atom f') (read a')
               args = read args'
           putStrLn $ "Spawning " ++ showMFA mfa ++ "."
           spawnProcess node mfa args

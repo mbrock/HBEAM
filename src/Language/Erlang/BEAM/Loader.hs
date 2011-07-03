@@ -33,7 +33,7 @@ data External  = ExtInteger Integer
                | ExtList    [External]
                deriving Show
 
-newtype Atom   = Atom String deriving (Show, Ord, Eq)
+newtype Atom   = Atom String deriving (Show, Read, Ord, Eq)
                       
 type Arity     = Integer
 type Label     = Integer

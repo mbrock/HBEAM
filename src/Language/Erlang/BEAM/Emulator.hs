@@ -1,3 +1,5 @@
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+
 module Language.Erlang.BEAM.Emulator where
 
 import Language.Erlang.BEAM.Loader
@@ -15,8 +17,15 @@ import Control.Monad
 import Control.Monad.IO.Class
 import Control.Monad.Trans.Reader
 
+import Control.Concurrent.Chan
+
 data EValue = EVInteger Integer
+            | EVAtom Atom
+            | EVPID PID
             deriving (Show, Eq, Read)
+                     
+newtype PID = PID Int
+            deriving (Show, Eq, Read, Ord, Num)
 
 data Function = Function { functionArity  :: Integer
                          , functionLabels :: Map Integer [Operation]
@@ -30,8 +39,9 @@ data Module = Module { moduleFunctions :: Map (Atom, Arity) Function
             deriving Show
 
 data Node = Node { nodeAtoms   :: [Atom]
-                 , nodeModules :: Map Atom Module }
-          deriving Show
+                 , nodeModules :: Map Atom Module 
+                 , nodePIDs    :: IORef (Map PID Process) 
+                 , nodeNextPID :: IORef PID }
 
 type Stack = IOArray Int EValue
 type CodePointer = [Operation]
@@ -39,7 +49,9 @@ type CodePointer = [Operation]
 data Process = Process { procRegs     :: IOArray Int EValue
                        , procStack    :: IORef Stack
                        , procSP       :: IORef Int 
-                       , procRetStack :: IORef [CodePointer] }
+                       , procRetStack :: IORef [CodePointer] 
+                       , procPID      :: PID 
+                       , procMailbox  :: Chan EValue }
                
 data EmulationCtx = EmulationCtx { emuNode     :: Node
                                  , emuProcess  :: Process
@@ -50,10 +62,14 @@ type Emulation a = ReaderT EmulationCtx IO a
 emuModule :: EmulationCtx -> Module
 emuModule = functionModule . emuFunction
 
-nodeFromBEAMFile :: BEAMFile -> Node
+nodeFromBEAMFile :: BEAMFile -> IO Node
 nodeFromBEAMFile b =
-  Node { nodeAtoms = beamFileAtoms b
-       , nodeModules = Map.fromList [(name, moduleFromBEAMFile b)] }
+  do pids <- newIORef Map.empty
+     nextPID <- newIORef 0
+     return Node { nodeAtoms = beamFileAtoms b
+                 , nodeModules = Map.fromList [(name, moduleFromBEAMFile b)]
+                 , nodePIDs = pids 
+                 , nodeNextPID = nextPID }
     where name = beamFileAtoms b !! 0
                      
 moduleFromBEAMFile :: BEAMFile -> Module
@@ -78,14 +94,19 @@ splitBlocks (("label", [UOperand i]) : os) = Map.insert i os (splitBlocks os)
 splitBlocks (_:os) = splitBlocks os
 
 spawnProcess :: Node -> MFA -> [EValue] -> IO ()
-spawnProcess node mfa args =
-  do p <- Process <$> newArray (0, 7) (EVInteger 0)
+spawnProcess n mfa args =
+  do pid <- readIORef (nodeNextPID n)
+     modifyIORef (nodeNextPID n) (+ 1)
+     p <- Process <$> newArray (0, 7) (EVInteger 0)
                   <*> (newArray (0, 7) (EVInteger 0) >>= newIORef)
                   <*> newIORef 0
                   <*> newIORef [[]]
-     let Just f = findMFA node mfa
+                  <*> return pid
+                  <*> newChan
+     modifyIORef (nodePIDs n) (Map.insert pid p)
+     let Just f = findMFA n mfa
      result <- runReaderT (moveArgsToRegs args >> call >> getReg 0)
-       (EmulationCtx { emuNode = node
+       (EmulationCtx { emuNode = n
                      , emuProcess = p
                      , emuFunction = f })
      putStrLn $ "Return value: " ++ show result
@@ -157,24 +178,29 @@ popRetStack = do p <- asks emuProcess
 interpret1 :: Operation -> [Operation] -> Emulation ()
 interpret1 o os =
   case o of
+    ("label", _) -> interpret os
     ("is_eq_exact", [FOperand label, a, b]) ->
       do (a', b') <- (,) <$> getOperand a <*> getOperand b
          if a' == b'
            then interpret os
            else jump label
-    ("allocate_zero", [UOperand size, _]) ->
-      do sp <- getSP
-         ensureStackSize (fromIntegral (fromIntegral size + sp))
-         advanceSP (fromIntegral size)
+    ("allocate",      [UOperand size, _]) -> allocate size >> interpret os
+    ("allocate_zero", [UOperand size, _]) -> allocate size >> interpret os
+    ("bif0", [UOperand i, dest]) ->
+      do bif <- getBIF i
+         bif [] >>= setOperand dest
+         liftIO $ putStrLn "ran bif0"
          interpret os
     ("gc_bif2", [_, _, UOperand i, a, b, dest]) ->
       do bif <- getBIF i
          (a', b') <- (,) <$> getOperand a <*> getOperand b
-         setOperand dest (bif [a', b'])
+         bif [a', b'] >>= setOperand dest
          interpret os
     ("move", [src, dest]) ->
       do getOperand src >>= setOperand dest
          interpret os
+    ("jump", [FOperand label]) ->
+      do jump label
     ("call", [_, FOperand label]) ->
       do pushRetStack os
          callByLabel label
@@ -184,18 +210,59 @@ interpret1 o os =
     ("deallocate", [UOperand m]) ->
       do advanceSP (- (fromIntegral m))
          interpret os
-    _ ->
-      do liftIO $ print "  dunno"
+    ("send", []) ->
+      do EVPID pid <- getReg 0
+         v <- getReg 1
+         send pid v
          interpret os
+    ("loop_rec", [FOperand label, dest]) ->
+      do mailbox <- asks (procMailbox . emuProcess)
+         noMail <- liftIO $ isEmptyChan mailbox
+         if noMail
+           then jump label
+           else do x <- liftIO $ readChan mailbox
+                   liftIO $ unGetChan mailbox x
+                   setOperand dest x
+                   interpret os
+    ("remove_message", []) ->
+      do mailbox <- asks (procMailbox . emuProcess)
+         liftIO $ readChan mailbox
+         interpret os
+    ("wait", [FOperand label]) ->
+      do mailbox <- asks (procMailbox . emuProcess)
+         liftIO $ do x <- readChan mailbox
+                     unGetChan mailbox x
+         jump label
+    _ ->
+      do fail $ "unhandled instruction: " ++ show o
          
-getBIF :: Integer -> Emulation ([EValue] -> EValue)
+send :: PID -> EValue -> Emulation ()
+send pid x =
+  do p <- lookupPID pid
+     liftIO $ writeChan (procMailbox p) x
+     
+lookupPID :: PID -> Emulation Process
+lookupPID pid =
+  do pids <- asks (nodePIDs . emuNode) >>= liftIO . readIORef
+     return (pids Map.! pid)
+         
+allocate :: Integer -> Emulation ()
+allocate size =
+  do sp <- getSP
+     ensureStackSize (fromIntegral (fromIntegral size + sp))
+     advanceSP (fromIntegral size)
+
+getBIF :: Integer -> Emulation ([EValue] -> Emulation EValue)
 getBIF i =
   do f <- asks emuFunction
+     p <- asks emuProcess
      case (moduleImports (functionModule f)) !! (fromIntegral i) of
        MFA (Atom "erlang") (Atom "-") 2 ->
-         return $ \([EVInteger x, EVInteger y]) -> EVInteger (x - y)
+         return $ \([EVInteger x, EVInteger y]) -> return (EVInteger (x - y))
        MFA (Atom "erlang") (Atom "*") 2 ->
-         return $ \([EVInteger x, EVInteger y]) -> EVInteger (x * y)
+         return $ \([EVInteger x, EVInteger y]) -> return (EVInteger (x * y))
+       MFA (Atom "erlang") (Atom "self") 0 ->
+         return $ \[] -> return $ EVPID (procPID p)
        mfa -> fail $ "no BIF for " ++ showMFA mfa
                 
 ensureStackSize :: Integer -> Emulation () 
@@ -216,6 +283,7 @@ getOperand o =
     IOperand x -> return (EVInteger x)
     XOperand i -> getReg (fromIntegral i)
     YOperand i -> getStack (fromIntegral i)
+    AOperand a -> return (EVAtom a)
     _          -> fail $ "getOperand: " ++ show o
     
 setOperand :: Operand -> EValue -> Emulation ()
