@@ -5,24 +5,26 @@ module Language.Erlang.BEAM.Emulator where
 import Language.Erlang.BEAM.Loader
 import Language.Erlang.BEAM.Types
 
-import Data.Map (Map)
+import           Data.Map (Map)
 import qualified Data.Map as Map
 
 import Data.Char (ord)
 import Data.List (tails)
 
-import Data.Array.IO
-import Data.Array.MArray
+import Data.Array.IO (IOArray)
+import Data.Array.MArray (readArray, writeArray, getBounds, newArray)
 
-import Data.IORef
+import Data.IORef (IORef, newIORef, readIORef, writeIORef, modifyIORef)
 
-import Control.Applicative
-import Control.Monad
-import Control.Monad.IO.Class
-import Control.Monad.Trans.Reader
+import Control.Applicative ((<$>), (<*>))
 
-import Control.Monad.STM
-import Control.Concurrent
+import Control.Monad (when, forM_, join)
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Trans.Reader (ReaderT, runReaderT, local, asks)
+
+import Control.Monad.STM (STM, atomically)
+
+import Control.Concurrent (forkIO)
 import Control.Concurrent.STM.TVar
 import Control.Concurrent.STM.TChan
 

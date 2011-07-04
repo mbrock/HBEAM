@@ -10,17 +10,16 @@ import qualified Codec.Compression.Zlib as Zlib
 import Data.Binary ()
 import Data.Binary.Get
 
-import Data.Char
+import Data.Char (chr)
 import Data.Bits
-import Data.Maybe
 
 import qualified Data.Text.Lazy as T
+import           Data.Text.Lazy.Encoding (decodeASCII)
 
-import Data.Text.Lazy.Encoding
+import Control.Applicative ((<$>), (<*>))
 
-import Control.Monad
-import Control.Monad.Loops
-import Control.Applicative
+import Control.Monad (unless, replicateM)
+import Control.Monad.Loops (untilM)
 
 data BEAMFile = BEAMFile { beamFileAtoms   :: [Atom] 
                          , beamFileFunDefs :: [FunDef] 
