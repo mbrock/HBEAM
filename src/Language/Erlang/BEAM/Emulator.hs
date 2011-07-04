@@ -220,6 +220,9 @@ jump :: Label -> Emulation ()
 jump label = do f <- asks emuFunction
                 interpret (functionLabels f Map.! label)
 
+getRegistersUpTo :: Int -> Emulation [EValue]
+getRegistersUpTo n = mapM (getOperand . XOperand) [0..(n-1)]
+
 interpret1 :: Operation -> CodePointer -> Emulation ()
 interpret1 o os =
   case o of
@@ -237,15 +240,15 @@ interpret1 o os =
          getBIF i >>= ($ [a', b']) >>= setOperand dest
          interpret os
     OpCallExt n i ->
-      do args <- mapM (getOperand . XOperand) [0..(n-1)]
+      do args <- getRegistersUpTo n
          getImportedFunction i >>= ($ args) >>= setOperand (XOperand 0)
          interpret os
     OpCallExtOnly n i ->
-      do args <- mapM (getOperand . XOperand) [0..(n-1)]
+      do args <- getRegistersUpTo n
          getImportedFunction i >>= ($ args) >>= setOperand (XOperand 0)
          popRetStack >>= interpret
     OpCallExtLast n i dealloc ->
-      do args <- mapM (getOperand . XOperand) [0..(n-1)]
+      do args <- getRegistersUpTo n
          advanceSP (- (fromIntegral dealloc))
          getImportedFunction i >>= ($ args) >>= setOperand (XOperand 0)
          popRetStack >>= interpret
