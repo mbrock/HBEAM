@@ -35,7 +35,7 @@ newtype PID = PID Int
             deriving (Show, Eq, Read, Ord, Num, Real, Enum, Integral)
 
 data Function = Function { functionArity  :: Integer
-                         , functionLabels :: Map Integer [Operation]
+                         , functionLabels :: Map Integer CodePointer
                          , functionEntry  :: Label
                          , functionModule :: Module }
               deriving Show
@@ -95,7 +95,7 @@ functionFromFunDef m (FunDef name arity entry code) =
                            , functionEntry  = entry 
                            , functionModule = m })
   
-splitBlocks :: [Operation] -> Map Integer [Operation]
+splitBlocks :: [Operation] -> Map Integer CodePointer
 splitBlocks code = foldr f Map.empty (zip code (tail (tails code)))
   where f (("label", [UOperand i]), pc) m = Map.insert i pc m
         f _                             m = m
@@ -204,7 +204,7 @@ popRetStack = do p <- asks emuProcess
                  liftIO $ writeIORef (procRetStack p) pcs
                  return pc'
 
-interpret :: [Operation] -> Emulation ()
+interpret :: CodePointer -> Emulation ()
 interpret []     = return ()
 interpret (o:os) = do liftIO $ print o
                       interpret1 o os
@@ -213,7 +213,7 @@ jump :: Label -> Emulation ()
 jump label = do f <- asks emuFunction
                 interpret (functionLabels f Map.! label)
 
-interpret1 :: Operation -> [Operation] -> Emulation ()
+interpret1 :: Operation -> CodePointer -> Emulation ()
 interpret1 o os =
   case o of
     ("label", _) -> interpret os
@@ -250,8 +250,7 @@ interpret1 o os =
     ("call_last", [_, FOperand label, UOperand dealloc]) ->
       do advanceSP (- (fromIntegral dealloc))
          jump label
-    ("return", []) ->
-      popRetStack >>= interpret
+    ("return", []) -> popRetStack >>= interpret
     ("deallocate", [UOperand m]) ->
       do advanceSP (- (fromIntegral m))
          interpret os
