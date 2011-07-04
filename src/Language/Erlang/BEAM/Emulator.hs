@@ -47,7 +47,7 @@ data Module = Module { moduleFunctions :: Map (Atom, Arity) Function
 
 data Node = Node { nodeAtoms   :: [Atom]
                  , nodeModules :: Map Atom Module 
-                 , nodePIDs    :: IORef (Map PID Process) 
+                 , nodePIDs    :: TVar (Map PID Process) 
                  , nodeNextPID :: TVar PID }
 
 type Stack = IOArray Int EValue
@@ -71,7 +71,7 @@ emuModule = functionModule . emuFunction
 
 nodeFromBEAMFile :: BEAMFile -> IO Node
 nodeFromBEAMFile b =
-  do pids    <- newIORef Map.empty
+  do pids    <- newTVarIO Map.empty
      nextPID <- newTVarIO 0
      return Node { nodeAtoms   = beamFileAtoms b
                  , nodeModules = Map.fromList [(name, moduleFromBEAMFile b)]
@@ -104,7 +104,7 @@ spawnProcess :: Node -> MFA -> [EValue] -> IO PID
 spawnProcess n mfa args =
   do pid <- atomically $ incrementTVar (nodeNextPID n)
      p   <- newProcess pid
-     modifyIORef (nodePIDs n) (Map.insert pid p)
+     atomically $ modifyTVar (nodePIDs n) (Map.insert pid p)
      let Just f = findMFA n mfa
      forkIO $ do
        result <- runReaderT (moveArgsToRegs args >> call >> getReg 0)
@@ -124,10 +124,14 @@ newProcess pid =
    <*> return pid
    <*> atomically newTChan
 
-incrementTVar :: Integral a => TVar a -> STM a
-incrementTVar v = do x <- readTVar v
-                     writeTVar v (x + 1)
-                     return x
+incrementTVar :: (Num a) => TVar a -> STM a
+incrementTVar v =
+  do x <- readTVar v
+     writeTVar v (x + 1)
+     return x
+
+modifyTVar :: TVar a -> (a -> a) -> STM ()
+modifyTVar v f = readTVar v >>= writeTVar v . f
 
 findMFA :: Node -> MFA -> Maybe Function
 findMFA node (MFA m f a) =
@@ -292,7 +296,7 @@ send pid x =
      
 lookupPID :: EValue -> Emulation Process
 lookupPID (EVPID pid) =
-  (Map.! pid) <$> (asks (nodePIDs . emuNode) >>= liftIO . readIORef)
+  (Map.! pid) <$> (asks (nodePIDs . emuNode) >>= liftIO . readTVarIO)
 lookupPID x =
   fail $ "lookupPID: " ++ show x ++ " is not a PID"
          
