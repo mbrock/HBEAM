@@ -75,7 +75,7 @@ nodeFromBEAMFile b =
                  , nodeModules = Map.fromList [(name, moduleFromBEAMFile b)]
                  , nodePIDs = pids 
                  , nodeNextPID = nextPID }
-    where name = beamFileAtoms b !! 0
+    where name = head (beamFileAtoms b)
                      
 moduleFromBEAMFile :: BEAMFile -> Module
 moduleFromBEAMFile b =
@@ -112,9 +112,9 @@ spawnProcess n mfa args =
      let Just f = findMFA n mfa
      forkIO $ do
        result <- runReaderT (moveArgsToRegs args >> call >> getReg 0)
-                   (EmulationCtx { emuNode = n
-                                 , emuProcess = p
-                                 , emuFunction = f })
+                   EmulationCtx { emuNode = n
+                                , emuProcess = p
+                                , emuFunction = f }
        putStrLn $ "PROCESS " ++ show pid ++ ": " ++ show result
      return pid
          
@@ -128,7 +128,7 @@ call = do f <- asks emuFunction
           callByLabel (functionEntry f)
      
 moveArgsToRegs :: [EValue] -> Emulation ()
-moveArgsToRegs args = forM_ (zip [0..] args) (\(i, x) -> setReg i x)
+moveArgsToRegs args = forM_ (zip [0..] args) (uncurry setReg)
              
 callByLabel :: Label -> Emulation ()
 callByLabel label =
@@ -211,8 +211,7 @@ interpret1 o os =
     ("move", [src, dest]) ->
       do getOperand src >>= setOperand dest
          interpret os
-    ("jump", [FOperand label]) ->
-      do jump label
+    ("jump", [FOperand label]) -> jump label
     ("call", [_, FOperand label]) ->
       do pushRetStack os
          callByLabel label
@@ -255,10 +254,8 @@ interpret1 o os =
          EVList cdr' <- getOperand cdr
          setOperand dest (EVList (car':cdr'))
          interpret os
-    ("test_heap", _) ->
-      do interpret os
-    _ ->
-      do fail $ "unhandled instruction: " ++ show o
+    ("test_heap", _) -> interpret os
+    _ -> fail $ "unhandled instruction: " ++ show o
          
 send :: PID -> EValue -> Emulation ()
 send pid x =
@@ -295,7 +292,7 @@ getBIF :: Integer -> Emulation ([EValue] -> Emulation EValue)
 getBIF i =
   do f <- asks emuFunction
      p <- asks emuProcess
-     case (moduleImports (functionModule f)) !! (fromIntegral i) of
+     case moduleImports (functionModule f) !! fromIntegral i of
        MFA (Atom "erlang") (Atom "-") 2 ->
          return $ \([EVInteger x, EVInteger y]) -> return (EVInteger (x - y))
        MFA (Atom "erlang") (Atom "+") 2 ->
