@@ -2,6 +2,7 @@ module Main where
 
 import System.Environment (getArgs)
 
+import Language.Erlang.BEAM.Types
 import Language.Erlang.BEAM.Loader
 import Language.Erlang.BEAM.Emulator
 

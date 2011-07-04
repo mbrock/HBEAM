@@ -3,6 +3,7 @@
 module Language.Erlang.BEAM.Emulator where
 
 import Language.Erlang.BEAM.Loader
+import Language.Erlang.BEAM.Types
 
 import Data.Map (Map)
 import qualified Data.Map as Map
@@ -34,8 +35,8 @@ data EValue = EVInteger Integer
 newtype PID = PID Int
             deriving (Show, Eq, Read, Ord, Num, Real, Enum, Integral)
 
-data Function = Function { functionArity  :: Integer
-                         , functionLabels :: Map Integer CodePointer
+data Function = Function { functionArity  :: Arity
+                         , functionLabels :: Map Label CodePointer
                          , functionEntry  :: Label
                          , functionModule :: Module }
               deriving Show
@@ -95,10 +96,10 @@ functionFromFunDef m (FunDef name arity entry code) =
                            , functionEntry  = entry 
                            , functionModule = m })
   
-splitBlocks :: [Operation] -> Map Integer CodePointer
+splitBlocks :: [Operation] -> Map Label CodePointer
 splitBlocks code = foldr f Map.empty (zip code (tail (tails code)))
-  where f (("label", [UOperand i]), pc) m = Map.insert i pc m
-        f _                             m = m
+  where f (OpLabel i, pc) m = Map.insert i pc m
+        f _               m = m
 
 spawnProcess :: Node -> MFA -> [EValue] -> IO PID
 spawnProcess n mfa args =
@@ -220,48 +221,50 @@ jump label = do f <- asks emuFunction
 interpret1 :: Operation -> CodePointer -> Emulation ()
 interpret1 o os =
   case o of
-    ("label", _) -> interpret os
-    ("is_eq_exact", [FOperand label, a, b]) ->
+    OpLabel _ -> interpret os
+    OpIsEqExact label a b ->
       do eq <- (==) <$> getOperand a <*> getOperand b
          if eq then interpret os else jump label
-    ("allocate",      [UOperand size, _]) ->
-      allocate (fromIntegral size) >> interpret os
-    ("allocate_zero", [UOperand size, _]) ->
-      allocate (fromIntegral size) >> interpret os
-    ("bif0", [UOperand i, dest]) ->
+    OpAllocate size ->
+      allocate size >> interpret os
+    OpBIF0 i dest ->
       do getBIF i >>= ($ []) >>= setOperand dest
          interpret os
-    ("gc_bif2", [_, _, UOperand i, a, b, dest]) ->
+    OpBIF2 i a b dest ->
       do (a', b') <- (,) <$> getOperand a <*> getOperand b
          getBIF i >>= ($ [a', b']) >>= setOperand dest
          interpret os
-    ("call_ext", [UOperand n, UOperand i]) ->
+    OpCallExt n i ->
       do args <- mapM (getOperand . XOperand) [0..(n-1)]
          getImportedFunction i >>= ($ args) >>= setOperand (XOperand 0)
          interpret os
-    ("call_ext_last", [UOperand n, UOperand i, UOperand dealloc]) ->
+    OpCallExtOnly n i ->
+      do args <- mapM (getOperand . XOperand) [0..(n-1)]
+         getImportedFunction i >>= ($ args) >>= setOperand (XOperand 0)
+         popRetStack >>= interpret
+    OpCallExtLast n i dealloc ->
       do args <- mapM (getOperand . XOperand) [0..(n-1)]
          advanceSP (- (fromIntegral dealloc))
          getImportedFunction i >>= ($ args) >>= setOperand (XOperand 0)
          popRetStack >>= interpret
-    ("move", [src, dest]) ->
+    OpMove src dest ->
       do getOperand src >>= setOperand dest
          interpret os
-    ("jump", [FOperand label]) -> jump label
-    ("call", [_, FOperand label]) ->
+    OpJump label -> jump label
+    OpCall _ label ->
       do pushRetStack os
          callByLabel label
-    ("call_last", [_, FOperand label, UOperand dealloc]) ->
+    OpCallLast label dealloc ->
       do advanceSP (- (fromIntegral dealloc))
          jump label
-    ("return", []) -> popRetStack >>= interpret
-    ("deallocate", [UOperand m]) ->
+    OpReturn -> popRetStack >>= interpret
+    OpDeallocate m ->
       do advanceSP (- (fromIntegral m))
          interpret os
-    ("send", []) ->
+    OpSend ->
       do join $ send <$> getReg 0 <*> getReg 1
          interpret os
-    ("loop_rec", [FOperand label, dest]) ->
+    OpLoopRec label dest ->
       do mailbox <- asks (procMailbox . emuProcess)
          noMail <- liftIO $ atomically (isEmptyTChan mailbox)
          if noMail
@@ -272,21 +275,21 @@ interpret1 o os =
                              return x'
                    setOperand dest x
                    interpret os
-    ("remove_message", []) ->
+    OpRemoveMessage ->
       do mailbox <- asks (procMailbox . emuProcess)
          liftIO $ atomically $ readTChan mailbox
          interpret os
-    ("wait", [FOperand label]) ->
+    OpWait label ->
       do mailbox <- asks (procMailbox . emuProcess)
          liftIO $ atomically $ do x <- readTChan mailbox
                                   unGetTChan mailbox x
          jump label
-    ("put_list", [car, cdr, dest]) ->
+    OpPutList car cdr dest ->
       do car' <- getOperand car
          EVList cdr' <- getOperand cdr
          setOperand dest (EVList (car':cdr'))
          interpret os
-    ("test_heap", _) -> interpret os
+    OpTestHeap -> interpret os
     _ -> fail $ "unhandled instruction: " ++ show o
          
 send :: EValue -> EValue -> Emulation ()
@@ -300,7 +303,7 @@ lookupPID (EVPID pid) =
 lookupPID x =
   fail $ "lookupPID: " ++ show x ++ " is not a PID"
          
-getImportedFunction :: Integer -> Emulation ([EValue] -> Emulation EValue)
+getImportedFunction :: Index -> Emulation ([EValue] -> Emulation EValue)
 getImportedFunction i =
   do thisModule <- asks emuModule
      case moduleImports thisModule !! fromIntegral i of
@@ -315,7 +318,7 @@ getImportedFunction i =
                             return (EVInteger 0)
        mfa -> fail $ "no such imported function " ++ showMFA mfa
 
-getBIF :: Integer -> Emulation ([EValue] -> Emulation EValue)
+getBIF :: Index -> Emulation ([EValue] -> Emulation EValue)
 getBIF i =
   do f <- asks emuFunction
      p <- asks emuProcess

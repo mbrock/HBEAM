@@ -1,6 +1,8 @@
 module Language.Erlang.BEAM.Loader where
 
 import Language.Erlang.BEAM.Opcodes
+import Language.Erlang.BEAM.Operation
+import Language.Erlang.BEAM.Types
 
 import qualified Data.ByteString.Lazy as B
 import qualified Codec.Compression.Zlib as Zlib
@@ -20,50 +22,15 @@ import Control.Monad
 import Control.Monad.Loops
 import Control.Applicative
 
-type ChunkData = B.ByteString
-type Chunk     = (String, ChunkData)
-
-type Opcode    = String
-type Operation = (Opcode, [Operand])
-
-data External  = ExtInteger Integer
-               | ExtTuple   [External]
-               | ExtAtom    String
-               | ExtString  String
-               | ExtList    [External]
-               deriving Show
-
-newtype Atom   = Atom String deriving (Show, Read, Ord, Eq)
-                      
-type Arity     = Integer
-type Label     = Integer
-                                      
-data MFA       = MFA    Atom Atom  Arity deriving Show
-data Export    = Export Atom Arity Label deriving Show
-
-data FunDef    = FunDef Atom Arity Label [Operation]
-               deriving Show
-      
 data BEAMFile = BEAMFile { beamFileAtoms   :: [Atom] 
                          , beamFileFunDefs :: [FunDef] 
                          , beamFileImports :: [MFA] 
                          , beamFileExports :: [Export] }
               deriving Show
+     
+type ChunkData = B.ByteString
+type Chunk     = (String, ChunkData)
 
-data OperandTag = TagA | TagF | TagH | TagI | TagU
-                | TagX | TagY | TagZ
-                | TagFR | TagAtom | TagFloat | TagLiteral
-                deriving Show
-     
-data Operand = IOperand Integer
-             | UOperand Integer
-             | XOperand Integer
-             | YOperand Integer
-             | FOperand Integer
-             | AOperand Atom
-             | LOperand External
-             deriving Show
-     
 readBEAMFile :: ChunkData -> [Chunk]
 readBEAMFile binary = runGet (getHeader >> getChunks) binary
   where 
@@ -138,8 +105,7 @@ parseCodeChunk atoms literals =
                skip 8 -- label & function counts
 
 parseOperations :: [Atom] -> [Operation] -> [FunDef]
-parseOperations atoms (_ : ("func_info", [AOperand _, AOperand f, UOperand a])
-                         : xs@(("label", [UOperand entry]) : _)) =
+parseOperations atoms (_ : OpFuncInfo _ f a : xs@(OpLabel entry : _)) =
   let (code, rest) = splitToNextFunctionLabel [] xs
   in FunDef f a entry code : parseOperations atoms rest
 parseOperations _ [] = []
@@ -150,10 +116,10 @@ splitToNextFunctionLabel :: [Operation] -> [Operation] ->
                             ([Operation], [Operation])
 splitToNextFunctionLabel acc ops =
   case ops of
-    (_ : ("func_info", _) : _) -> (reverse acc, ops)
-    [("int_code_end", [])]     -> (reverse acc, [])
-    (x:xs)                     -> splitToNextFunctionLabel (x:acc) xs
-    []                         -> error "code chunk ended prematurely"
+    (_ : OpFuncInfo _ _ _ : _) -> (reverse acc, ops)
+    [OpIntCodeEnd]              -> (reverse acc, [])
+    (x:xs)                      -> splitToNextFunctionLabel (x:acc) xs
+    []                          -> error "code chunk ended prematurely"
      
 readAtom :: [Atom] -> Get Atom
 readAtom atoms = atomIndex atoms <$> (getInt32 :: Get Int)
@@ -162,7 +128,7 @@ readOperation :: [External] -> [Atom] -> Get Operation
 readOperation literals atoms =
   do (opcode, argCount) <- (opcodeInfo . fromIntegral) <$> getWord8
      args <- replicateM argCount (readOperand literals atoms)
-     return (opcode, args)
+     return (makeOperation opcode args)
      
 readOperand :: [External] -> [Atom] -> Get Operand
 readOperand literals atoms =
@@ -203,11 +169,11 @@ readIntegralOperand :: Integer -> Get Operand
 readIntegralOperand tag =
   do i <- readInteger tag
      return $ case parseTag tag of
-                TagU -> UOperand i
+                TagU -> UOperand (fromIntegral i)
                 TagI -> IOperand i
-                TagX -> XOperand i
-                TagY -> YOperand i
-                TagF -> FOperand i
+                TagX -> XOperand (fromIntegral i)
+                TagY -> YOperand (fromIntegral i)
+                TagF -> FOperand (fromIntegral i)
                 x    -> error ("readIntegralOperand: ? " ++ show x)
       
 readInteger :: Integer -> Get Integer
