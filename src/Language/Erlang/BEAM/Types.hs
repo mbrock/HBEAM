@@ -1,3 +1,5 @@
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+
 module Language.Erlang.BEAM.Types where
 
 newtype Atom = Atom String deriving (Show, Read, Ord, Eq)
@@ -17,6 +19,15 @@ data MFA    = MFA    Atom Atom  Arity             deriving Show
 data Export = Export Atom Arity Label             deriving Show
 data FunDef = FunDef Atom Arity Label [Operation] deriving Show
       
+data EValue = EVInteger Integer
+            | EVAtom Atom
+            | EVList [EValue]
+            | EVPID PID
+            deriving (Show, Eq, Read)
+                     
+newtype PID = PID Int
+            deriving (Show, Eq, Read, Ord, Num, Real, Enum, Integral)
+
 data OperandTag = TagA | TagF | TagH | TagI | TagU
                 | TagX | TagY | TagZ
                 | TagFR | TagAtom | TagFloat | TagLiteral

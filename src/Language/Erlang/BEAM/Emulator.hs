@@ -1,9 +1,8 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-
 module Language.Erlang.BEAM.Emulator where
 
 import Language.Erlang.BEAM.Loader
 import Language.Erlang.BEAM.Types
+import Language.Erlang.BEAM.Mailbox
 
 import           Data.Map (Map)
 import qualified Data.Map as Map
@@ -26,16 +25,6 @@ import Control.Monad.STM (STM, atomically)
 
 import Control.Concurrent (forkIO)
 import Control.Concurrent.STM.TVar
-import Control.Concurrent.STM.TChan
-
-data EValue = EVInteger Integer
-            | EVAtom Atom
-            | EVList [EValue]
-            | EVPID PID
-            deriving (Show, Eq, Read)
-                     
-newtype PID = PID Int
-            deriving (Show, Eq, Read, Ord, Num, Real, Enum, Integral)
 
 data Function = Function { functionArity  :: Arity
                          , functionLabels :: Map Label CodePointer
@@ -61,7 +50,7 @@ data Process = Process { procRegs     :: IOArray Int EValue
                        , procSP       :: IORef Int 
                        , procRetStack :: IORef [CodePointer] 
                        , procPID      :: PID 
-                       , procMailbox  :: TChan EValue }
+                       , procMailbox  :: Mailbox }
                
 data EmulationCtx = EmulationCtx { emuNode     :: Node
                                  , emuProcess  :: Process
@@ -125,7 +114,7 @@ newProcess pid =
    <*> newIORef 0
    <*> newIORef [[]]
    <*> return pid
-   <*> atomically newTChan
+   <*> newMailbox
 
 incrementTVar :: (Num a) => TVar a -> STM a
 incrementTVar v =
@@ -270,24 +259,13 @@ interpret1 o os =
       do join $ send <$> getReg 0 <*> getReg 1
          interpret os
     OpLoopRec label dest ->
-      do mailbox <- asks (procMailbox . emuProcess)
-         noMail <- liftIO $ atomically (isEmptyTChan mailbox)
-         if noMail
-           then jump label
-           else do x <- liftIO $ atomically $ 
-                          do x' <- readTChan mailbox
-                             unGetTChan mailbox x'
-                             return x'
-                   setOperand dest x
-                   interpret os
+      currentMailbox >>= liftIO . pollMailbox >>=
+        maybe (jump label) (\x -> setOperand dest x >> interpret os)
     OpRemoveMessage ->
-      do mailbox <- asks (procMailbox . emuProcess)
-         liftIO $ atomically $ readTChan mailbox
+      do currentMailbox >>= liftIO . removeMessage
          interpret os
     OpWait label ->
-      do mailbox <- asks (procMailbox . emuProcess)
-         liftIO $ atomically $ do x <- readTChan mailbox
-                                  unGetTChan mailbox x
+      do currentMailbox >>= liftIO . awaitMessage
          jump label
     OpPutList car cdr dest ->
       do car' <- getOperand car
@@ -297,10 +275,13 @@ interpret1 o os =
     OpTestHeap -> interpret os
     _ -> fail $ "unhandled instruction: " ++ show o
          
+currentMailbox :: Emulation Mailbox
+currentMailbox = asks (procMailbox . emuProcess)
+
 send :: EValue -> EValue -> Emulation ()
 send pid x =
   do p <- lookupPID pid
-     liftIO $ atomically $ writeTChan (procMailbox p) x
+     liftIO $ deliverMessage (procMailbox p) x
      
 lookupPID :: EValue -> Emulation Process
 lookupPID (EVPID pid) =
