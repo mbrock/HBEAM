@@ -219,8 +219,7 @@ interpret1 o os =
     OpIsEqExact label a b ->
       do eq <- (==) <$> getOperand a <*> getOperand b
          if eq then interpret os else jump label
-    OpAllocate size ->
-      allocate size >> interpret os
+    OpAllocate size -> allocate size >> interpret os
     OpBIF0 i dest ->
       do getBIF i >>= ($ []) >>= setOperand dest
          interpret os
@@ -228,29 +227,28 @@ interpret1 o os =
       do (a', b') <- (,) <$> getOperand a <*> getOperand b
          getBIF i >>= ($ [a', b']) >>= setOperand dest
          interpret os
-    OpCallExt n i ->
-      do args <- getRegistersUpTo n
-         getImportedFunction i >>= ($ args) >>= setOperand (XOperand 0)
-         interpret os
-    OpCallExtOnly n i ->
-      do args <- getRegistersUpTo n
-         getImportedFunction i >>= ($ args) >>= setOperand (XOperand 0)
-         popRetStack >>= interpret
-    OpCallExtLast n i dealloc ->
-      do args <- getRegistersUpTo n
-         advanceSP (- (fromIntegral dealloc))
-         getImportedFunction i >>= ($ args) >>= setOperand (XOperand 0)
-         popRetStack >>= interpret
-    OpMove src dest ->
-      do getOperand src >>= setOperand dest
-         interpret os
-    OpJump label -> jump label
     OpCall _ label ->
       do pushRetStack os
          callByLabel label
     OpCallLast label dealloc ->
       do advanceSP (- (fromIntegral dealloc))
          jump label
+    OpCallExt n i ->
+      do getRegistersUpTo n >>= callImportedFunction i
+         interpret os
+    OpCallExtOnly n i ->
+      -- FIXME: Should this be more tail recursive?
+      do getRegistersUpTo n >>= callImportedFunction i
+         popRetStack >>= interpret
+    OpCallExtLast n i dealloc ->
+      do args <- getRegistersUpTo n
+         advanceSP (- (fromIntegral dealloc))
+         callImportedFunction i args
+         popRetStack >>= interpret
+    OpMove src dest ->
+      do getOperand src >>= setOperand dest
+         interpret os
+    OpJump label -> jump label
     OpReturn -> popRetStack >>= interpret
     OpDeallocate m ->
       do advanceSP (- (fromIntegral m))
@@ -288,7 +286,11 @@ lookupPID (EVPID pid) =
   (Map.! pid) <$> (asks (nodePIDs . emuNode) >>= liftIO . readTVarIO)
 lookupPID x =
   fail $ "lookupPID: " ++ show x ++ " is not a PID"
-         
+
+callImportedFunction :: Index -> [EValue] -> Emulation()
+callImportedFunction i args =
+  getImportedFunction i >>= ($ args) >>= setOperand (XOperand 0)
+
 getImportedFunction :: Index -> Emulation ([EValue] -> Emulation EValue)
 getImportedFunction i =
   do thisModule <- asks emuModule
