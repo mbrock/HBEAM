@@ -49,13 +49,15 @@ type CodePointer = [Operation]
 data Process = Process { procRegs     :: IOArray Int EValue
                        , procStack    :: IORef Stack
                        , procSP       :: IORef Int 
-                       , procRetStack :: IORef [CodePointer] 
+                       , procRetStack :: IORef [(Function, CodePointer)]
                        , procPID      :: PID 
                        , procMailbox  :: Mailbox }
                
-data EmulationCtx = EmulationCtx { emuNode     :: Node
-                                 , emuProcess  :: Process
-                                 , emuFunction :: Function }
+data EmulationCtx =
+  EmulationCtx { emuNode     :: Node
+               , emuProcess  :: Process
+               , emuFunction :: Function 
+               , emuTuple    :: (Arity, [EValue], Operand) }
                
 type Emulation a = ReaderT EmulationCtx IO a
                
@@ -103,7 +105,8 @@ spawnProcess n mfa args =
        result <- runReaderT (moveArgsToRegs args >> call >> getReg 0)
                    EmulationCtx { emuNode = n
                                 , emuProcess = p
-                                , emuFunction = f }
+                                , emuFunction = f 
+                                , emuTuple = undefined }
        putStrLn $ "PROCESS " ++ show pid ++ ": " ++ show result
      return pid
   
@@ -268,7 +271,31 @@ interpret1 o os =
          EVList cdr' <- getOperand cdr
          setOperand dest (EVList (car':cdr'))
          interpret os
+    OpPutTuple n dest ->
+      local (\c -> c { emuTuple = (n, [], dest) }) (interpret os)
+    OpPut x ->
+      do x' <- getOperand x
+         (n, xs, dest) <- asks emuTuple
+         case n of
+           1 -> do setOperand dest (EVTuple (reverse (x':xs)))
+                   interpret os
+           _ -> local (\c -> c { emuTuple = (n - 1, x':xs, dest) }) $
+                   interpret os
+    OpIsTuple label x ->
+      do x' <- getOperand x
+         case x' of
+           EVTuple _ -> interpret os
+           _         -> jump label
+    OpTestArity label x n ->
+      do EVTuple x' <- getOperand x
+         if length x' == n
+           then interpret os
+           else jump label
+    OpGetTupleElement x i dest ->
+      do getOperand x >>= \(EVTuple xs) -> setOperand dest (xs !! i)
+         interpret os
     OpTestHeap -> interpret os
+    OpInit a -> setOperand a (EVList []) >> interpret os
     _ -> fail $ "unhandled instruction: " ++ show o
          
 currentMailbox :: Emulation Mailbox

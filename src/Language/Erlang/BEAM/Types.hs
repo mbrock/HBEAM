@@ -22,6 +22,7 @@ data FunDef = FunDef Atom Arity Label [Operation] deriving Show
 data EValue = EVInteger Integer
             | EVAtom Atom
             | EVList [EValue]
+            | EVTuple [EValue] -- FIXME: O(1)
             | EVPID PID
             deriving (Show, Eq, Read)
                      
@@ -48,21 +49,28 @@ data Operation =
   | OpBIF2 Index Operand Operand Operand
   | OpCall Int Label
   | OpCallExt Arity Index
-  | OpCallExtOnly Arity Index
   | OpCallExtLast Arity Index Int
+  | OpCallExtOnly Arity Index
   | OpCallLast Label Int
   | OpDeallocate Index
   | OpFuncInfo Atom Atom Arity
+  | OpGetTupleElement Operand Index Operand
+  | OpInit Operand
   | OpIntCodeEnd
   | OpIsEqExact Label Operand Operand
+  | OpIsTuple Label Operand
   | OpJump Label
   | OpLabel Label
   | OpLoopRec Label Operand
+  | OpLoopRecEnd Label
   | OpMove Operand Operand
+  | OpPut Operand
   | OpPutList Operand Operand Operand
+  | OpPutTuple Arity Operand
   | OpRemoveMessage
   | OpReturn
   | OpSend
+  | OpTestArity Label Operand Arity
   | OpTestHeap
   | OpUnknown String [Operand]
   | OpWait Label
