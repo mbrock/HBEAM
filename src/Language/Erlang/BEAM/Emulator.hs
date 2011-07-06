@@ -116,7 +116,7 @@ newProcess pid =
    <$> newArray (0, 7) (EVInteger 0)
    <*> (newArray (0, 7) (EVInteger 0) >>= newIORef)
    <*> newIORef 0
-   <*> newIORef [[]]
+   <*> newIORef []
    <*> return pid
    <*> newMailbox
 
@@ -193,17 +193,30 @@ ensureStackSize n =
              
 pushRetStack :: CodePointer -> Emulation ()
 pushRetStack cp =
-  asks emuProcess >>= \p -> liftIO (modifyIORef (procRetStack p) (cp:))
+  do p <- asks emuProcess 
+     f <- asks emuFunction
+     liftIO (modifyIORef (procRetStack p) ((f, cp):))
 
-popRetStack :: Emulation CodePointer
+popRetStack :: Emulation (Maybe (Function, CodePointer))
 popRetStack = do p <- asks emuProcess
-                 (pc':pcs) <- liftIO $ readIORef (procRetStack p)
-                 liftIO $ writeIORef (procRetStack p) pcs
-                 return pc'
+                 stack <- liftIO $ readIORef (procRetStack p)
+                 case stack of
+                   (pc:pcs) -> do liftIO $ writeIORef (procRetStack p) pcs
+                                  return (Just pc)
+                   _ -> return Nothing
+
+doReturn :: Emulation ()
+doReturn = do x <- popRetStack
+              case x of
+                Just (f, pc) ->
+                  local (\c -> c { emuFunction = f }) (interpret pc)
+                Nothing ->
+                  return ()
 
 interpret :: CodePointer -> Emulation ()
 interpret []     = return ()
-interpret (o:os) = do liftIO $ print o
+interpret (o:os) = do p <- asks emuProcess
+                      liftIO . putStrLn $ show (procPID p) ++ ": " ++ show o
                       interpret1 o os
 
 jump :: Label -> Emulation ()
@@ -240,17 +253,17 @@ interpret1 o os =
     OpCallExtOnly n i ->
       -- FIXME: Should this be more tail recursive?
       do getRegistersUpTo n >>= callImportedFunction i
-         popRetStack >>= interpret
+         doReturn
     OpCallExtLast n i dealloc ->
       do args <- getRegistersUpTo n
          advanceSP (- (fromIntegral dealloc))
          callImportedFunction i args
-         popRetStack >>= interpret
+         doReturn
     OpMove src dest ->
       do getOperand src >>= setOperand dest
          interpret os
     OpJump label -> jump label
-    OpReturn -> popRetStack >>= interpret
+    OpReturn -> doReturn
     OpDeallocate m ->
       do advanceSP (- (fromIntegral m))
          interpret os
