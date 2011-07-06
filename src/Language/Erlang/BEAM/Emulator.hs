@@ -368,6 +368,7 @@ getOperand o =
     IOperand x -> return (EVInteger x)
     XOperand i -> getReg (fromIntegral i)
     YOperand i -> getStack (fromIntegral i)
+    AOperand (Atom "nil") -> return (EVList [])
     AOperand a -> return (EVAtom a)
     LOperand (ExtString s) ->
       return (EVList (map (EVInteger . fromIntegral . ord) s))
