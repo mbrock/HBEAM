@@ -260,6 +260,9 @@ interpret1 o os =
     OpLoopRec label dest ->
       currentMailbox >>= liftIO . pollMailbox >>=
         maybe (jump label) (\x -> setOperand dest x >> interpret os)
+    OpLoopRecEnd label ->
+      do currentMailbox >>= liftIO . moveMessageToSaveQueue
+         jump label
     OpRemoveMessage ->
       do currentMailbox >>= liftIO . removeMessage
          interpret os
