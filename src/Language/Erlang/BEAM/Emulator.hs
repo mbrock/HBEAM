@@ -2,6 +2,7 @@ module Language.Erlang.BEAM.Emulator where
 
 import Language.Erlang.BEAM.Loader
 import Language.Erlang.BEAM.Types
+import Language.Erlang.BEAM.Utils
 import Language.Erlang.BEAM.Mailbox
 
 import           Data.Map (Map)
@@ -121,9 +122,6 @@ incrementTVar v =
   do x <- readTVar v
      writeTVar v (x + 1)
      return x
-
-modifyTVar :: TVar a -> (a -> a) -> STM ()
-modifyTVar v f = readTVar v >>= writeTVar v . f
 
 findMFA :: Node -> MFA -> Maybe Function
 findMFA node (MFA m f a) =
