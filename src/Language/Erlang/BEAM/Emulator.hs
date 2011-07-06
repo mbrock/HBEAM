@@ -8,7 +8,7 @@ import Language.Erlang.BEAM.Mailbox
 import           Data.Map (Map)
 import qualified Data.Map as Map
 
-import Data.Char (ord)
+import Data.Char (ord, chr)
 import Data.List (tails)
 
 import Data.Array.IO (IOArray)
@@ -343,9 +343,22 @@ getImportedFunction i =
                        pid <- liftIO $ spawnProcess n mfa args
                        return (EVPID pid)
        MFA (Atom "hbeam") (Atom "display") _ ->
-         return $ \xs -> do liftIO $ putStrLn ("!! " ++ show xs)
-                            return (EVInteger 0)
+         return $ \xs ->
+           do liftIO $ putStrLn ("!! " ++ displayEVs xs)
+              return (EVInteger 0)
        mfa -> fail $ "no such imported function " ++ showMFA mfa
+
+displayEVs :: [EValue] -> String
+displayEVs evs = concatMap f evs
+  where f (EVList xs) = displayEVList xs
+        f x = show x
+        
+displayEVList :: [EValue] -> String
+displayEVList xs = if all p xs
+                   then map (\(EVInteger x) -> chr (fromIntegral x)) xs
+                   else show xs
+  where p (EVInteger x) = (0 <= x) && (x <= 255)
+        p _ = False
 
 getBIF :: Index -> Emulation ([EValue] -> Emulation EValue)
 getBIF i =
