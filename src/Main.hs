@@ -8,8 +8,6 @@ import Language.Erlang.BEAM.Emulator
 
 import qualified Data.ByteString.Lazy as B
 
-import qualified Data.Map as Map
-
 import Control.Applicative
 
 import Control.Concurrent (threadDelay)

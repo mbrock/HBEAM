@@ -22,10 +22,13 @@ import Control.Monad (when, forM_, join)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Reader (ReaderT, runReaderT, local, asks)
 
-import Control.Monad.STM (STM, atomically)
+import Control.Monad.STM (atomically)
 
 import Control.Concurrent (forkIO)
 import Control.Concurrent.STM.TVar
+
+
+--- Data types relevant to the emulator.
 
 data Function = Function { functionArity  :: Arity
                          , functionLabels :: Map Label CodePointer
@@ -60,10 +63,18 @@ data EmulationCtx =
                , emuTuple    :: (Arity, [EValue], Operand) }
                
 type Emulation a = ReaderT EmulationCtx IO a
-               
+
+
+--- Emulation state data stuff.
+
+findMFA :: Node -> MFA -> Maybe Function
+findMFA node (MFA m f a) =
+  do m' <- Map.lookup m (nodeModules node)
+     Map.lookup (f, a) (moduleFunctions m')
+     
 emuModule :: EmulationCtx -> Module
 emuModule = functionModule . emuFunction
-
+               
 nodeFromBEAMFile :: BEAMFile -> IO Node
 nodeFromBEAMFile b =
   do pids    <- newTVarIO Map.empty
@@ -90,10 +101,14 @@ functionFromFunDef m (FunDef name arity entry code) =
                            , functionEntry  = entry 
                            , functionModule = m })
   
+-- Scan a function block for labels.
 splitBlocks :: [Operation] -> Map Label CodePointer
 splitBlocks code = foldr f Map.empty (zip code (tail (tails code)))
   where f (OpLabel i, pc) m = Map.insert i pc m
         f _               m = m
+
+
+--- Processes, PIDs, and messages.
 
 spawnProcess :: Node -> MFA -> [EValue] -> IO PID
 spawnProcess n mfa args =
@@ -110,6 +125,12 @@ spawnProcess n mfa args =
        putStrLn $ "PROCESS " ++ show pid ++ ": " ++ show result
      return pid
   
+lookupPID :: EValue -> Emulation Process
+lookupPID (EVPID pid) =
+  (Map.! pid) <$> (asks (nodePIDs . emuNode) >>= liftIO . readTVarIO)
+lookupPID x =
+  fail $ "lookupPID: " ++ show x ++ " is not a PID"
+
 newProcess :: PID -> IO Process
 newProcess pid = 
   Process
@@ -119,30 +140,18 @@ newProcess pid =
    <*> newIORef []
    <*> return pid
    <*> newMailbox
+   
+send :: EValue -> EValue -> Emulation ()
+send pid x =
+  do p <- lookupPID pid
+     liftIO $ deliverMessage (procMailbox p) x
 
-incrementTVar :: (Num a) => TVar a -> STM a
-incrementTVar v =
-  do x <- readTVar v
-     writeTVar v (x + 1)
-     return x
-
-findMFA :: Node -> MFA -> Maybe Function
-findMFA node (MFA m f a) =
-  do m' <- Map.lookup m (nodeModules node)
-     Map.lookup (f, a) (moduleFunctions m')
-
-call :: Emulation ()
-call = asks emuFunction >>= callByLabel . functionEntry
+currentMailbox :: Emulation Mailbox
+currentMailbox = asks (procMailbox . emuProcess)
      
-moveArgsToRegs :: [EValue] -> Emulation ()
-moveArgsToRegs args = mapM_ (uncurry setReg) (zip [0..] args)
-             
-callByLabel :: Label -> Emulation ()
-callByLabel label =
-  do f <- asks ((Map.! label) . moduleEntries . emuModule)
-     local (\c -> c { emuFunction = f })
-       (interpret (functionLabels f Map.! label))
-     
+
+--- Registers and stack.
+
 setReg :: Int -> EValue -> Emulation ()
 setReg i x = do asks emuProcess >>= \p -> liftIO $ writeArray (procRegs p) i x
                 pid <- asks (procPID . emuProcess)
@@ -151,6 +160,12 @@ setReg i x = do asks emuProcess >>= \p -> liftIO $ writeArray (procRegs p) i x
 
 getReg :: Int -> Emulation EValue
 getReg i = asks emuProcess >>= \p -> liftIO $ readArray (procRegs p) i
+
+getRegistersUpTo :: Int -> Emulation [EValue]
+getRegistersUpTo n = mapM (getOperand . XOperand) [0..(n-1)]
+
+moveArgsToRegs :: [EValue] -> Emulation ()
+moveArgsToRegs args = mapM_ (uncurry setReg) (zip [0..] args)
 
 setStack :: Int -> EValue -> Emulation ()
 setStack i x = do p <- asks emuProcess
@@ -190,6 +205,9 @@ ensureStackSize n =
              forM_ [0..(size - 1)]
                (\i -> readArray stack i >>= writeArray newStack i)
              writeIORef (procStack p) newStack)
+
+
+--- The return stack.
              
 pushRetStack :: CodePointer -> Emulation ()
 pushRetStack cp =
@@ -213,27 +231,53 @@ doReturn = do x <- popRetStack
                 Nothing ->
                   return ()
 
+
+--- Evaluation.
+
 interpret :: CodePointer -> Emulation ()
 interpret []     = return ()
 interpret (o:os) = do p <- asks emuProcess
                       liftIO . putStrLn $ show (procPID p) ++ ": " ++ show o
                       interpret1 o os
 
-jump :: Label -> Emulation ()
-jump label = do f <- asks emuFunction
-                interpret (functionLabels f Map.! label)
-
-getRegistersUpTo :: Int -> Emulation [EValue]
-getRegistersUpTo n = mapM (getOperand . XOperand) [0..(n-1)]
-
+-- Emulates a single instruction & then continues.
 interpret1 :: Operation -> CodePointer -> Emulation ()
 interpret1 o os =
   case o of
-    OpLabel _ -> interpret os
+    OpLabel _  -> interpret os
+    
+    -- I don't know what this is...
+    OpTestHeap -> interpret os
+    
+    -- Stack & heap management stuff.
+    OpAllocate size -> allocate size            >> interpret os
+    OpInit a        -> setOperand a (EVList []) >> interpret os
+    OpDeallocate m  ->
+      do advanceSP (- (fromIntegral m))
+         interpret os
+
+    -- Basic flow control.
+    OpJump label -> jump label
+    OpReturn     -> doReturn
+    
+    -- Conditionals.
     OpIsEqExact label a b ->
       do eq <- (==) <$> getOperand a <*> getOperand b
          if eq then interpret os else jump label
-    OpAllocate size -> allocate size >> interpret os
+    OpTestArity label x n ->
+      do EVTuple x' <- getOperand x
+         if length x' == n
+           then interpret os
+           else jump label
+         
+    -- Type checks.
+    OpIsTuple label x ->
+      do x' <- getOperand x
+         case x' of
+           EVTuple _ -> interpret os
+           _         -> jump label
+         
+    -- Invocations.
     OpBIF0 i dest ->
       do getBIF i >>= ($ []) >>= setOperand dest
          interpret os
@@ -259,14 +303,8 @@ interpret1 o os =
          advanceSP (- (fromIntegral dealloc))
          callImportedFunction i args
          doReturn
-    OpMove src dest ->
-      do getOperand src >>= setOperand dest
-         interpret os
-    OpJump label -> jump label
-    OpReturn -> doReturn
-    OpDeallocate m ->
-      do advanceSP (- (fromIntegral m))
-         interpret os
+         
+    -- Message sending and receiving.
     OpSend ->
       do join $ send <$> getReg 0 <*> getReg 1
          interpret os
@@ -282,6 +320,11 @@ interpret1 o os =
     OpWait label ->
       do currentMailbox >>= liftIO . awaitMessage
          jump label
+         
+    -- Data stuff.
+    OpMove src dest ->
+      do getOperand src >>= setOperand dest
+         interpret os
     OpPutList car cdr dest ->
       do car' <- getOperand car
          EVList cdr' <- getOperand cdr
@@ -297,36 +340,31 @@ interpret1 o os =
                    interpret os
            _ -> local (\c -> c { emuTuple = (n - 1, x':xs, dest) }) $
                    interpret os
-    OpIsTuple label x ->
-      do x' <- getOperand x
-         case x' of
-           EVTuple _ -> interpret os
-           _         -> jump label
-    OpTestArity label x n ->
-      do EVTuple x' <- getOperand x
-         if length x' == n
-           then interpret os
-           else jump label
     OpGetTupleElement x i dest ->
       do getOperand x >>= \(EVTuple xs) -> setOperand dest (xs !! i)
          interpret os
-    OpTestHeap -> interpret os
-    OpInit a -> setOperand a (EVList []) >> interpret os
+      
     _ -> fail $ "unhandled instruction: " ++ show o
          
-currentMailbox :: Emulation Mailbox
-currentMailbox = asks (procMailbox . emuProcess)
+         
+--- Helpers for the evaluator.
 
-send :: EValue -> EValue -> Emulation ()
-send pid x =
-  do p <- lookupPID pid
-     liftIO $ deliverMessage (procMailbox p) x
+call :: Emulation ()
+call = asks emuFunction >>= callByLabel . functionEntry
      
-lookupPID :: EValue -> Emulation Process
-lookupPID (EVPID pid) =
-  (Map.! pid) <$> (asks (nodePIDs . emuNode) >>= liftIO . readTVarIO)
-lookupPID x =
-  fail $ "lookupPID: " ++ show x ++ " is not a PID"
+-- Call the local function having a given entry point.
+callByLabel :: Label -> Emulation ()
+callByLabel label =
+  do f <- asks ((Map.! label) . moduleEntries . emuModule)
+     local (\c -> c { emuFunction = f })
+       (interpret (functionLabels f Map.! label))
+     
+jump :: Label -> Emulation ()
+jump label = do f <- asks emuFunction
+                interpret (functionLabels f Map.! label)
+
+
+--- Handling nonlocal function calls.
 
 callImportedFunction :: Index -> [EValue] -> Emulation()
 callImportedFunction i args =
@@ -348,18 +386,6 @@ getImportedFunction i =
               return (EVInteger 0)
        mfa -> fail $ "no such imported function " ++ showMFA mfa
 
-displayEVs :: [EValue] -> String
-displayEVs evs = concatMap f evs
-  where f (EVList xs) = displayEVList xs
-        f x = show x
-        
-displayEVList :: [EValue] -> String
-displayEVList xs = if all p xs
-                   then map (\(EVInteger x) -> chr (fromIntegral x)) xs
-                   else show xs
-  where p (EVInteger x) = (0 <= x) && (x <= 255)
-        p _ = False
-
 getBIF :: Index -> Emulation ([EValue] -> Emulation EValue)
 getBIF i =
   do f <- asks emuFunction
@@ -374,7 +400,9 @@ getBIF i =
        MFA (Atom "erlang") (Atom "self") 0 ->
          return $ \[] -> return $ EVPID (procPID p)
        mfa -> fail $ "no BIF for " ++ showMFA mfa
-                
+  
+--- Handling operands.
+  
 getOperand :: Operand -> Emulation EValue
 getOperand o =
   case o of
@@ -394,5 +422,20 @@ setOperand o v =
     YOperand i -> setStack (fromIntegral i) v
     _          -> fail $ "setOperand: " ++ show (o, v)
     
+    
+--- Formatting utility functions.
+
+displayEVs :: [EValue] -> String
+displayEVs evs = concatMap f evs
+  where f (EVList xs) = displayEVList xs
+        f x = show x
+        
+displayEVList :: [EValue] -> String
+displayEVList xs = if all p xs
+                   then map (\(EVInteger x) -> chr (fromIntegral x)) xs
+                   else show xs
+  where p (EVInteger x) = (0 <= x) && (x <= 255)
+        p _ = False
+
 showMFA :: MFA -> String
 showMFA (MFA (Atom m) (Atom f) a) = m ++ ":" ++ f ++ "/" ++ show a
