@@ -8,6 +8,8 @@ import Language.Erlang.BEAM.Emulator
 
 import qualified Data.ByteString.Lazy as B
 
+import qualified Data.Map as Map
+
 import Control.Applicative
 
 import Control.Concurrent (threadDelay)
@@ -33,14 +35,14 @@ main = do Just x <- (parseBEAMFile . readBEAMFile) <$> B.getContents
                      putStrLn "") (beamFileFunDefs x)
 
           putStrLn ""
-          [m', f', a', args'] <- getArgs
+          [m', f', args'] <- getArgs
           node <- nodeFromBEAMFile x
-          let mfa = MFA (Atom m') (Atom f') (read a')
+          let mfa = MFA (Atom m') (Atom f') (length args)
               args = read args'
           putStrLn $ "Spawning " ++ showMFA mfa ++ "."
           spawnProcess node mfa args
           
-          threadDelay 3000000
+          threadDelay 10000000
           
           return ()
           
