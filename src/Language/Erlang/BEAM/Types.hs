@@ -72,6 +72,8 @@ data Operation =
   | OpSend
   | OpTestArity Label Operand Arity
   | OpTestHeap
+  | OpTimeout
   | OpUnknown String [Operand]
   | OpWait Label
+  | OpWaitTimeout Label Operand
   deriving Show

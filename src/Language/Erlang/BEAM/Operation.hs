@@ -36,6 +36,8 @@ makeOperation name args =
     ("loop_rec_end", [FOperand a]) -> OpLoopRecEnd a
     ("remove_message", []) -> OpRemoveMessage
     ("wait", [FOperand a]) -> OpWait a
+    ("wait_timeout", [FOperand a, b]) -> OpWaitTimeout a b
+    ("timeout", []) -> OpTimeout
     ("put_tuple", [UOperand a, b]) -> OpPutTuple a b
     ("put", [a]) -> OpPut a
     ("put_list", [a, b, c]) -> OpPutList a b c

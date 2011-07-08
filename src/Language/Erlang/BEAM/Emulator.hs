@@ -22,7 +22,7 @@ import Control.Monad (when, forM_, join)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Reader (ReaderT, runReaderT, local, asks)
 
-import Control.Monad.STM (atomically)
+import Control.Monad.STM (STM, atomically)
 
 import Control.Concurrent (forkIO)
 import Control.Concurrent.STM.TVar
@@ -64,6 +64,8 @@ data EmulationCtx =
                
 type Emulation a = ReaderT EmulationCtx IO a
 
+liftSTM :: STM a -> Emulation a
+liftSTM = liftIO . atomically
 
 --- Emulation state data stuff.
 
@@ -139,12 +141,12 @@ newProcess pid =
    <*> newIORef 0
    <*> newIORef []
    <*> return pid
-   <*> newMailbox
+   <*> atomically newMailbox
    
 send :: EValue -> EValue -> Emulation ()
 send pid x =
   do p <- lookupPID pid
-     liftIO $ deliverMessage (procMailbox p) x
+     liftSTM $ deliverMessage (procMailbox p) x
 
 currentMailbox :: Emulation Mailbox
 currentMailbox = asks (procMailbox . emuProcess)
@@ -246,7 +248,7 @@ interpret1 o os =
   case o of
     OpLabel _  -> interpret os
     
-    -- I don't know what this is...
+    -- Supposed to test whether heap is full and if so GC.
     OpTestHeap -> interpret os
     
     -- Stack & heap management stuff.
@@ -309,17 +311,33 @@ interpret1 o os =
       do join $ send <$> getReg 0 <*> getReg 1
          interpret os
     OpLoopRec label dest ->
-      currentMailbox >>= liftIO . pollMailbox >>=
+      currentMailbox >>= liftSTM . pollMailbox >>=
         maybe (jump label) (\x -> setOperand dest x >> interpret os)
     OpLoopRecEnd label ->
-      do currentMailbox >>= liftIO . moveMessageToSaveQueue
+      do currentMailbox >>= liftSTM . moveMessageToSaveQueue
          jump label
     OpRemoveMessage ->
-      do currentMailbox >>= liftIO . removeMessage
+      do m <- currentMailbox
+         liftSTM (removeMessage m >> unreadSaveQueue m)
          interpret os
     OpWait label ->
-      do currentMailbox >>= liftIO . awaitMessage
+      do currentMailbox >>= liftSTM . awaitMessage
          jump label
+    OpWaitTimeout label x ->
+      do timeout <- getOperand x
+         mailbox <- currentMailbox
+         case timeout of
+           EVAtom (Atom "infinity") ->
+             liftSTM (awaitMessage mailbox) >> jump label
+           EVInteger n ->
+             join . liftIO $
+               awaitMessageTimeout mailbox (fromIntegral n)
+                                   (jump label) (interpret os)
+           _ ->
+             fail $ "wait_timeout: " ++ show timeout ++ " not a timeout"
+    OpTimeout ->
+      do currentMailbox >>= liftSTM . unreadSaveQueue
+         interpret os
          
     -- Data stuff.
     OpMove src dest ->
